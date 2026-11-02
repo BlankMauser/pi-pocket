@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The repository root: `web/`, `src/`, and `node_modules/` live here. */
-export const APP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+export const APP_ROOT =
+    process.env.PI_POCKET_APP_ROOT ?? fileURLToPath(new URL("../..", import.meta.url));
 
 /** Where Pi Pocket keeps its database, users, uploads, and logs. */
 export function dataDir(): string {
@@ -65,6 +66,8 @@ interface PocketConfig {
     enabledExtensions?: string[];
     /** "others": a guest cannot allow a risky call that their own message led to. Absent: anyone who can steer may. */
     approvals?: ApprovalRule;
+    /** Ask OpenAI for its Fast (priority) tier. Older versions ignore this. */
+    openaiFast?: boolean;
 }
 
 /** Who may allow a risky tool call: anyone who can steer, or (for guests) only someone other than who asked. */
@@ -138,6 +141,20 @@ export class ConfigStore {
 
     get approvalRule(): ApprovalRule {
         return this.#config.approvals ?? "anyone";
+    }
+
+    get openaiFast(): boolean {
+        return this.#config.openaiFast === true;
+    }
+
+    set openaiFast(on: boolean) {
+        if (on) {
+            this.#config.openaiFast = true;
+        } else {
+            delete this.#config.openaiFast;
+        }
+
+        this.save();
     }
 
     set approvalRule(rule: ApprovalRule) {

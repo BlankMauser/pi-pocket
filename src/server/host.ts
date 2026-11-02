@@ -1,10 +1,11 @@
 import type { Context } from "@earendil-works/chord";
 import { awaitWithContext } from "@earendil-works/chord/context";
 import type { ConversationId, Extension, ModelRef, TaskId } from "@earendil-works/pi-durable";
-import type { Browsers } from "./browser.ts";
+import type { RoutedBrowsers as Browsers } from "./remote-browser.ts";
 import type { Goals } from "./goals.ts";
 import type { LancetGuard } from "./lancet.ts";
 import type { Schedules } from "./schedules.ts";
+import type { Workers } from "./workers.ts";
 
 export interface ApprovalRequest {
     id: string;
@@ -109,6 +110,7 @@ export interface PocketHost {
     readonly approvals: Approvals;
     readonly agentDir: string;
     readonly dataDir: string;
+    readonly workers?: Workers;
     /** Pi's configured extra skill paths, from its settings. */
     skillPaths(): string[];
     /** `provider/modelId` (or a bare model id) to an available model, or an error naming the choices. */
@@ -122,7 +124,7 @@ export interface PocketHost {
     /** Sessions' goals: the goals extension runs their checks and counts them. */
     readonly goals: Pick<Goals, "get" | "run" | "record" | "mayContinue">;
     /** The built-in browser: a page per conversation, which the people in it watch and use too. */
-    readonly browsers: Pick<Browsers, "open">;
+    readonly browsers: Pick<Browsers, "open" | "remote">;
 }
 
 /** The shape of every module in `src/server/extensions/`: a default export building one or more extensions. */

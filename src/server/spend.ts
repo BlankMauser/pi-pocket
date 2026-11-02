@@ -5,6 +5,7 @@
  * and a run that crosses it is stopped; the model request that crossed it still counts.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Usage } from "@earendil-works/pi-ai";
 import { type ConversationId, UsageDoc, type UsageState } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
@@ -37,6 +38,8 @@ export class Spend {
     #people: Record<string, number> = {};
     /** Runs being stopped for a limit, until they end: each is stopped, and announced, once. */
     readonly #stopping = new Set<ConversationId>();
+    /** An explicit payer for a supplemental request's exact usage commit, not whoever is driving the chat. */
+    readonly #supplemental = new Map<ConversationId, { payer: string; total: number }>();
     #timer: NodeJS.Timeout | undefined;
 
     constructor(app: PocketApp) {
@@ -99,8 +102,15 @@ export class Spend {
 
         this.#costs.set(id, cost);
 
+        const supplemental = this.#supplemental.get(id);
+        const payer = supplemental?.total === cost ? supplemental.payer : this.#payer(id);
+
+        if (supplemental?.total === cost) {
+            this.#supplemental.delete(id);
+        }
+
         if (added > 0) {
-            this.#owe(id, this.#payer(id), added);
+            this.#owe(id, payer, added);
         }
 
         this.#timer ??= setTimeout(() => {
@@ -109,6 +119,53 @@ export class Spend {
                 this.#app.log(`spend not counted: ${describe(error)}`),
             );
         }, COUNT_AFTER_MS);
+    }
+
+    /** Record a tool-free side request without misattributing it to somebody else's ongoing agent run. */
+    async recordSupplementalUsage(
+        id: ConversationId,
+        payer: string,
+        model: string,
+        usage: Usage,
+    ): Promise<void> {
+        try {
+            await this.#app.harness.commit(async (tx) => {
+                const doc = await tx.doc(UsageDoc, id);
+                const total = (doc.models[model] ??= {
+                    input: 0,
+                    output: 0,
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    totalTokens: 0,
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                });
+
+                for (const key of [
+                    "input",
+                    "output",
+                    "cacheRead",
+                    "cacheWrite",
+                    "totalTokens",
+                ] as const) {
+                    total[key] += usage[key];
+                }
+
+                for (const key of [
+                    "input",
+                    "output",
+                    "cacheRead",
+                    "cacheWrite",
+                    "total",
+                ] as const) {
+                    total.cost[key] += usage.cost[key];
+                }
+
+                // Commits notify listeners synchronously; only this exact cost snapshot uses the explicit payer.
+                this.#supplemental.set(id, { payer, total: usageCost(doc) });
+            }, context);
+        } finally {
+            this.#supplemental.delete(id);
+        }
     }
 
     /** Who pays for a conversation's work: whoever asked for it, else whoever started the session, else the owner. */

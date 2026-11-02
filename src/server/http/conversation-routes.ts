@@ -1,12 +1,13 @@
 /** `/api/c/:id`: one conversation's routes, for people the API has checked may see it. */
 import { randomUUID } from "node:crypto";
 import { createWriteStream, rmSync } from "node:fs";
-import { basename, extname, join, resolve, sep } from "node:path";
+import { basename, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
-import { serveImage, TYPES } from "./assets.ts";
+import { machinePath } from "../workers.ts";
+import { serveImage, sniffImage, TYPES } from "./assets.ts";
 import { type ApiRequest, json, readJson, send } from "./io.ts";
 
 const MAX_UPLOAD = 50 * 1024 * 1024;
@@ -47,13 +48,14 @@ export async function conversationRoutes(
             throw new HttpError(400, "attachments must be a list");
         }
 
-        const attachments = (body.attachments ?? []).filter((file): file is Attachment => {
-            // Only files this server stored for this conversation.
-            return (
-                typeof file?.path === "string" &&
-                resolve(file.path).startsWith(app.workspace.uploadDirectory(id) + sep)
-            );
-        });
+        const permitted = await Promise.all(
+            (body.attachments ?? []).map(async (file) =>
+                typeof file?.path === "string" && (await app.workspace.isUpload(id, file.path))
+                    ? file
+                    : undefined,
+            ),
+        );
+        const attachments = permitted.filter((file): file is Attachment => file !== undefined);
 
         return json(response, 200, await app.commands.submit(id, user, { ...body, attachments }));
     }
@@ -256,6 +258,25 @@ export async function conversationRoutes(
             throw new HttpError(400, "path is required");
         }
 
+        if (machinePath(app.cwdOf(id)) !== undefined) {
+            const bytes = await app.workspace.readBytes(user, id, requested);
+            const type = sniffImage(bytes.subarray(0, 1024));
+
+            if (type === undefined) {
+                throw new HttpError(415, "That file is not an image");
+            }
+
+            if (bytes.length > 25 * 1024 * 1024) {
+                throw new HttpError(413, "Image too large to show");
+            }
+
+            return send(response, 200, bytes, type, {
+                "cache-control": "private, no-cache",
+                "content-security-policy":
+                    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:",
+            });
+        }
+
         return serveImage(request, response, app.workspace.conversationFile(user, id, requested));
     }
 
@@ -311,6 +332,10 @@ export async function conversationRoutes(
 
     // Prompt templates and skills, for the message box's slash commands.
     if (third === "prompts" && method === "GET") {
+        if (machinePath(app.cwdOf(id)) !== undefined) {
+            await app.workers.resources(app.cwdOf(id));
+        }
+
         const templates = app.promptTemplates(id).map(({ name, description, argumentHint }) => ({
             name,
             description,
@@ -390,6 +415,35 @@ export async function conversationRoutes(
 
         await app.conversation(id);
         const name = safeName(url.searchParams.get("name") ?? "upload");
+
+        if (machinePath(app.cwdOf(id)) !== undefined) {
+            const chunks: Buffer[] = [];
+            let size = 0;
+
+            for await (const chunk of request) {
+                size += chunk.length;
+
+                if (size > MAX_UPLOAD) {
+                    throw new HttpError(413, "Files can be up to 50 MB");
+                }
+
+                chunks.push(Buffer.from(chunk));
+            }
+
+            const file = await app.workspace.receiveUpload(id, name, Buffer.concat(chunks));
+            const mime =
+                String(request.headers["content-type"] ?? "") ||
+                TYPES[extname(name).toLowerCase()] ||
+                "application/octet-stream";
+
+            return json(response, 200, {
+                path: file,
+                name,
+                mime: mime.split(";")[0]!.trim(),
+                size,
+            });
+        }
+
         const directory = app.workspace.uploadDirectory(id);
         // Unique, and never written over: pasted images all arrive as image.png, often at once.
         const file = join(

@@ -6,15 +6,15 @@
  * Edit freely: saving this file reloads it into the running server.
  */
 import { join, resolve } from "node:path";
-import {
-    formatSkillsForPrompt,
-    getDocsPath,
-    loadProjectContextFiles,
-    loadSkills,
-} from "@earendil-works/pi-coding-agent";
-import { defineExtension, type PromptInput, section } from "@earendil-works/pi-durable";
+import type { PromptInput } from "@earendil-works/pi-durable";
 import { APP_ROOT } from "../config.ts";
 import type { PocketHost } from "../host.ts";
+import { openAiFastPrompt } from "../fast-mode-status.ts";
+import { codingAgentSdk, durableSdk } from "../runtime-sdk.ts";
+import { machinePath } from "../workers.ts";
+
+const { formatSkillsForPrompt, getDocsPath, loadProjectContextFiles, loadSkills } = codingAgentSdk;
+const { defineExtension, section } = durableSdk;
 
 const PREAMBLE = `You are Pi, a coding agent running inside Pi Pocket: a durable, multiplayer web app built on Pi Durable. People talk to you from a browser, often a phone, and several people can share one conversation. When more than one person uses this server, each message starts with [from: Name].
 
@@ -96,19 +96,52 @@ export default function createPrompt(host: PocketHost) {
 
     const cwdOf = (input: PromptInput) => input.env?.cwd ?? input.agent.cwd ?? process.cwd();
 
+    const remote = (input: PromptInput) => {
+        const cwd = input.agent.cwd ?? "";
+
+        return machinePath(cwd) === undefined ? undefined : cwd;
+    };
+
     return defineExtension({
         name: "pocket-prompt",
         sections: [
             section("preamble", () => PREAMBLE, { tag: false }),
             section("guidelines", () => GUIDELINES),
+            section("openai_fast", () => openAiFastPrompt(host.dataDir)),
             section("pocket_docs", () => docs(host.dataDir)),
-            section("project_context", (input) => load(cwdOf(input)).context),
-            section("skills", (input) => load(cwdOf(input)).skills, { tag: false }),
-            section("environment", (input) => {
+            section("project_context", async (input) => {
+                const cwd = remote(input);
+
+                return cwd === undefined
+                    ? load(cwdOf(input)).context
+                    : (await host.workers!.resources(cwd)).context;
+            }),
+            section(
+                "skills",
+                async (input) => {
+                    const cwd = remote(input);
+
+                    return cwd === undefined
+                        ? load(cwdOf(input)).skills
+                        : (await host.workers!.resources(cwd)).skills;
+                },
+                { tag: false },
+            ),
+            section("environment", async (input) => {
                 // The date only, so the prompt stays cache-friendly through the day.
                 const today = new Date().toISOString().slice(0, 10);
 
-                return `Working directory: ${cwdOf(input)}\nPlatform: ${process.platform}\nToday: ${today}`;
+                const cwd = remote(input);
+                const platform =
+                    cwd === undefined
+                        ? process.platform
+                        : (await host.workers!.resources(cwd)).platform;
+                const machine =
+                    cwd === undefined
+                        ? ""
+                        : `\nExecution machine: ${machinePath(cwd)!.machineId}. Files and commands run there; do not use mm:// identifiers in tool paths.`;
+
+                return `Working directory: ${cwdOf(input)}${machine}\nPlatform: ${platform}\nToday: ${today}`;
             }),
         ],
     });

@@ -1,5 +1,6 @@
 // App state, the server connection, and API calls. Components read `store.state` and re-render on `store.subscribe`.
 import { onRoute, pushRoute } from "./back.js";
+import { selectableModels } from "./model-selection.js";
 
 /** A random id. crypto.randomUUID only exists on https and localhost pages; plain-http network addresses lack it. */
 export function uid() {
@@ -254,6 +255,7 @@ export async function api(path, body, options = {}) {
     const init = {
         method: body === undefined && !options.method ? "GET" : (options.method ?? "POST"),
         headers: { "X-Pocket": "1" },
+        signal: options.signal,
     };
 
     if (body !== undefined) {
@@ -388,7 +390,7 @@ const handlers = {
         store.set({
             me: data.user,
             users: data.users,
-            models: data.models,
+            models: selectableModels(data.models),
             guard: data.guard,
             server: data.server,
             // This connection's id, which peek lists name (`peeks.js`). `GET /api/me` answers without one.
@@ -400,7 +402,7 @@ const handlers = {
             sessionsLoaded: true,
             moving: stillMoving(state.moving, sessions),
         })),
-    models: (models) => store.set({ models }),
+    models: (models) => store.set({ models: selectableModels(models) }),
     view: applyView,
     chat: applyChat,
     presence: (data) =>
@@ -741,7 +743,7 @@ export async function start() {
         store.set({
             me: hello.user,
             users: hello.users,
-            models: hello.models,
+            models: selectableModels(hello.models),
             guard: hello.guard,
             server: hello.server,
         });

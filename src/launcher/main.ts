@@ -44,7 +44,8 @@ import {
     yellow,
 } from "./term.ts";
 
-const SERVER = fileURLToPath(new URL("../server/main.ts", import.meta.url));
+const NATIVE_SERVER = process.env.PI_POCKET_NATIVE_SERVER;
+const SERVER = NATIVE_SERVER ?? fileURLToPath(new URL("../server/main.ts", import.meta.url));
 const RESTART_CODE = 75;
 
 // ─── Options ────────────────────────────────────────────────────────────
@@ -438,7 +439,12 @@ function startServer(first: boolean): void {
     }
 
     // Node 22 calls node:sqlite experimental and says so at every start, right above the panel.
-    const proc = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", ...args], {
+    const executable = NATIVE_SERVER ?? process.execPath;
+    const serverArgs =
+        NATIVE_SERVER === undefined
+            ? ["--disable-warning=ExperimentalWarning", ...args]
+            : args.slice(1);
+    const proc = spawn(executable, serverArgs, {
         stdio: ["ignore", "pipe", "pipe", "ipc"],
         env: { ...process.env, PI_POCKET_SUPERVISED: "1", PI_POCKET_LAUNCHER: "1" },
     });

@@ -1,7 +1,8 @@
-// The model picker: a menu under the model chip, searchable once there are many models.
+// Choose a provider, then search only that provider's models.
 import { useEffect, useRef, useState } from "preact/hooks";
-import { actions, attempt, closeSheet, openSheet, store } from "../store.js";
-import { anchorStyle, formatTokens, html, Icon, popAnchor } from "../ui.js";
+import { pickerModelChange } from "../model-selection.js";
+import { actions, api, attempt, closeSheet, notify, openSheet, store } from "../store.js";
+import { anchorStyle, copyText, formatTokens, html, Icon, popAnchor, Switch } from "../ui.js";
 
 /** Models past this many get a search box in the picker. */
 const MODEL_SEARCH_AT = 8;
@@ -20,6 +21,28 @@ export function ModelPicker() {
     const { models, view } = store.state;
     // While the picker animates out, the store has no sheet any more.
     const [query, setQuery] = useState(store.state.sheet?.query ?? "");
+    const providerIds = [...new Set(models.map((model) => model.provider))].sort();
+    const [provider, setProvider] = useState(() => {
+        const initial = query.trim().toLowerCase();
+        const matches = models.filter(
+            (model) =>
+                initial === "" ||
+                `${model.provider}/${model.id} ${model.name}`.toLowerCase().includes(initial),
+        );
+
+        return (
+            matches.find((model) => model.provider === view.agent?.model?.provider)?.provider ??
+            matches[0]?.provider ??
+            providerIds[0] ??
+            ""
+        );
+    });
+    const [providerNames, setProviderNames] = useState({
+        opencode: "OpenCode Zen",
+        "opencode-go": "OpenCode Go",
+        "openai-codex": "OpenAI Codex",
+    });
+    const selectedProvider = providerIds.includes(provider) ? provider : (providerIds[0] ?? "");
     // Decided once: a search box that went away when emptied would take the caret with it.
     const [searchable] = useState(() => models.length > MODEL_SEARCH_AT || query !== "");
     const [picked, setPicked] = useState(0);
@@ -37,13 +60,41 @@ export function ModelPicker() {
     const shown = models
         .filter(
             (model) =>
-                needle === "" ||
-                `${model.provider}/${model.id} ${model.name}`.toLowerCase().includes(needle),
+                model.provider === selectedProvider &&
+                (needle === "" ||
+                    `${model.provider}/${model.id} ${model.name}`.toLowerCase().includes(needle)),
         )
         .sort((a, b) => Number(isCurrent(b)) - Number(isCurrent(a)));
     // The list can change while the picker is open.
     const active = Math.max(0, Math.min(picked, shown.length - 1));
     const levels = agent?.levels ?? ["off"];
+    const providerLabel = (id) =>
+        `${providerNames[id] ?? id} (${models.filter((model) => model.provider === id).length})`;
+
+    useEffect(() => {
+        let live = true;
+
+        // Names are optional metadata: the model list still works if this request fails.
+        api("providers")
+            .then((providers) => {
+                if (live) {
+                    setProviderNames((names) => ({
+                        ...names,
+                        ...Object.fromEntries(providers.map((item) => [item.id, item.name])),
+                    }));
+                }
+            })
+            .catch(() => {});
+
+        return () => {
+            live = false;
+        };
+    }, []);
+    useEffect(() => {
+        if (list.current) {
+            list.current.scrollTop = 0;
+        }
+    }, [selectedProvider, query]);
 
     useEffect(() => {
         const place = () => setAnchor(modelAnchor());
@@ -75,7 +126,7 @@ export function ModelPicker() {
     const pick = (model) =>
         attempt(async () => {
             if (!isCurrent(model)) {
-                await actions.configure({ model: { provider: model.provider, modelId: model.id } });
+                await actions.configure(pickerModelChange(model));
             }
 
             closeSheet();
@@ -119,9 +170,27 @@ export function ModelPicker() {
             <header class="pop-menu-head">
                 <span>Model</span>
                 <button class="pop-menu-link" onClick=${() => openSheet({ type: "providers" })}>
-                    <${Icon} name="key" size=${13} /> Providers
+                    <${Icon} name="key" size=${13} /> Manage providers
                 </button>
             </header>
+            <label class="pop-menu-foot field">
+                <span class="label">Provider</span>
+                <select
+                    aria-label="Provider"
+                    value=${selectedProvider}
+                    disabled=${providerIds.length === 0}
+                    onChange=${(event) => {
+                        setProvider(event.currentTarget.value);
+                        setQuery("");
+                        setPicked(0);
+                    }}
+                >
+                    ${providerIds.length === 0 && html`<option value="">No providers available</option>`}
+                    ${providerIds.map(
+                        (id) => html`<option key=${id} value=${id}>${providerLabel(id)}</option>`,
+                    )}
+                </select>
+            </label>
             ${
                 searchable &&
                 html`<label class="search pop-menu-search">
@@ -137,7 +206,7 @@ export function ModelPicker() {
                     />
                 </label>`
             }
-            <div class="pop-menu-list" ref=${list} role="listbox" aria-label="Models">
+            <div class="pop-menu-list" ref=${list} role="list" aria-label="Models">
                 ${
                     models.length === 0 &&
                     html`<p class="muted pop-menu-note">
@@ -150,21 +219,39 @@ export function ModelPicker() {
                     html`<p class="muted pop-menu-note">No model matches “${query.trim()}”.</p>`
                 }
                 ${shown.map(
-                    (model, index) => html`<button
+                    (model, index) => html`<div
                         key=${`${model.provider}/${model.id}`}
                         class=${`pop-menu-row ${index === active ? "on" : ""}`}
-                        role="option"
-                        aria-selected=${isCurrent(model)}
-                        title=${`${model.provider}/${model.id} · ${formatTokens(model.contextWindow)} context${model.images ? " · images" : ""}`}
+                        role="listitem"
                         onMouseMove=${() => index !== active && setPicked(index)}
-                        onClick=${() => pick(model)}
                     >
+                        <button
+                            class="model-picker-select"
+                            type="button"
+                            aria-pressed=${isCurrent(model)}
+                            title=${`${model.provider}/${model.id} · ${formatTokens(model.contextWindow)} context${model.images ? " · images" : ""}`}
+                            onClick=${() => pick(model)}
+                        >
                         <span class="pop-menu-row-text">
                             <span class="pop-menu-row-name">${model.name}</span>
                             <span class="pop-menu-row-sub">${model.provider}</span>
                         </span>
                         ${isCurrent(model) && html`<${Icon} name="check" size=${14} />`}
-                    </button>`,
+                        </button>
+                        <button
+                            class="icon-button"
+                            type="button"
+                            aria-label=${`Copy model ID ${model.provider}/${model.id}`}
+                            title=${`Copy ${model.provider}/${model.id}`}
+                            onClick=${() =>
+                                copyText(`${model.provider}/${model.id}`).then(
+                                    () => notify("info", "Model ID copied."),
+                                    () => notify("error", "Could not copy model ID."),
+                                )}
+                        >
+                            <${Icon} name="copy" size=${15} />
+                        </button>
+                    </div>`,
                 )}
             </div>
             ${
@@ -184,6 +271,24 @@ export function ModelPicker() {
                                 </button>`,
                         )}
                     </div>
+                </div>`
+            }
+            ${
+                agent?.fastCapable &&
+                html`<div class="pop-menu-foot fast-row">
+                    <span class="fast-label">
+                        <span class="label">Fast mode</span>
+                        <small class="muted">OpenAI priority: quicker, may use more quota. Applies to every OpenAI model.</small>
+                    </span>
+                    <${Switch}
+                        label="OpenAI Fast mode"
+                        on=${Boolean(store.state.server?.openaiFast)}
+                        disabled=${store.state.me?.role !== "owner"}
+                        onChange=${() =>
+                            attempt(() =>
+                                api("settings", { openaiFast: !store.state.server?.openaiFast }),
+                            )}
+                    />
                 </div>`
             }
         </section>

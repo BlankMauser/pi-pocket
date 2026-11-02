@@ -23,6 +23,7 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Extension, Registry } from "@earendil-works/pi-durable";
 import { describe } from "./errors.ts";
+import { embeddedExtension } from "../../.bolt/embedded.ts";
 import type { ExtensionModule, PocketHost } from "./host.ts";
 
 /** Built-in extension modules, in install order. Other `.ts` files in the directory load after them, by name. */
@@ -325,7 +326,11 @@ export class ExtensionLoader {
         const url =
             pathToFileURL(join(module.directory, file)).href +
             (cacheBust ? `?v=${Date.now()}` : "");
-        const loaded = (await import(url)) as ExtensionModule;
+        const embedded =
+            module.source === "built-in"
+                ? embeddedExtension(file, join(module.directory, file))
+                : undefined;
+        const loaded = (embedded ?? (await import(url))) as ExtensionModule;
 
         if (typeof loaded.default !== "function") {
             throw new Error("the module has no default export function");

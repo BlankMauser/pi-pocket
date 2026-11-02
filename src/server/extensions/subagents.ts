@@ -7,21 +7,16 @@
  * from delivering a message or a report twice.
  */
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { Type } from "@earendil-works/pi-ai";
-import {
-    AssistantEntry,
-    type ConversationId,
-    configure,
-    defineExtension,
-    defineTask,
-    defineTool,
-    type Extension,
-    LiveDoc,
-    section,
-} from "@earendil-works/pi-durable";
+import type { ConversationId, Extension } from "@earendil-works/pi-durable";
 import { REPORT_PREFIX, SubagentsDoc } from "../docs.ts";
+import { openAiFastStatus, openAiFastSummary } from "../fast-mode-status.ts";
 import type { PocketHost } from "../host.ts";
 import { requestFor } from "../requests.ts";
+import { aiSdk, durableSdk } from "../runtime-sdk.ts";
+
+const { Type } = aiSdk;
+const { AssistantEntry, configure, defineExtension, defineTask, defineTool, LiveDoc, section } =
+    durableSdk;
 
 function textOf(message: AssistantMessage | undefined): string {
     return (message?.content ?? [])
@@ -142,7 +137,8 @@ export default function createSubagents(host: PocketHost) {
             "Manage persistent background subagents. Actions: spawn (name, message; optional model as provider/modelId, " +
             "thinking level, and tools to allow), send (name, message; followUp: true queues it after the current answer " +
             "instead of steering), stop (name: aborts its current work), status (one name, or all). Answers are reported " +
-            "back to you as messages when they arrive.",
+            "back to you as messages when they arrive. OpenAI Fast is inherited from the server switch automatically; " +
+            "no speed argument is needed. Results report the requested tier.",
         parameters: Type.Object({
             action: Type.Union([
                 Type.Literal("spawn"),
@@ -170,19 +166,34 @@ export default function createSubagents(host: PocketHost) {
         replay: "unsafe",
         execute: async (args, api, context) => {
             const { action, name, message, followUp } = args;
-            const reply = (text: string, conversationId?: ConversationId) => ({
-                content: [{ type: "text" as const, text }],
-                ...(conversationId === undefined || name === undefined
-                    ? {}
-                    : {
-                          details: {
-                              action,
-                              name,
-                              conversationId,
-                              ...(message === undefined ? {} : { message }),
-                          },
-                      }),
-            });
+
+            const reply = (text: string, conversationId?: ConversationId) => {
+                const openaiFast = openAiFastStatus(host.dataDir);
+
+                return {
+                    content: [
+                        {
+                            type: "text" as const,
+                            text:
+                                conversationId === undefined
+                                    ? text
+                                    : `${text} ${openAiFastSummary(openaiFast)}`,
+                        },
+                    ],
+                    ...(conversationId === undefined || name === undefined
+                        ? {}
+                        : {
+                              details: {
+                                  action,
+                                  name,
+                                  conversationId,
+                                  openaiFast,
+                                  ...(message === undefined ? {} : { message }),
+                              },
+                          }),
+                };
+            };
+
             const registry = (await api.snapshot(SubagentsDoc, api.conversationId, context)) ?? {
                 agents: {},
                 reporters: {},
@@ -205,7 +216,9 @@ export default function createSubagents(host: PocketHost) {
                         (await api.snapshot(LiveDoc, found.conversationId, context))?.run !==
                         undefined;
 
-                    lines.push(`${each}: ${busy ? "working" : "idle"}`);
+                    lines.push(
+                        `${each}: ${busy ? "working" : "idle"}. ${openAiFastSummary(openAiFastStatus(host.dataDir))}`,
+                    );
                 }
 
                 return reply(lines.length === 0 ? "No subagents." : lines.join("\n"));

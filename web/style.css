@@ -1785,6 +1785,52 @@ button.chip:hover {
     background: var(--accent-soft);
 }
 
+.voice-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 48px;
+}
+
+.voice-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.2rem 0.1rem;
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.voice-bar button {
+    min-height: 40px;
+}
+
+.voice-path {
+    display: block;
+    overflow-wrap: anywhere;
+    font-size: 0.75rem;
+}
+
+/* The dictation button: it pulses while the microphone is open. */
+.icon-button.dictate.on {
+    color: var(--err);
+    animation: dictating 1.4s ease-in-out infinite;
+}
+
+@keyframes dictating {
+    50% {
+        opacity: 0.45;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .icon-button.dictate.on {
+        animation: none;
+    }
+}
+
 .round {
     width: 36px;
     height: 36px;
@@ -3085,6 +3131,15 @@ button.chip:hover {
 
 .pop-menu-row:last-child {
     border-bottom: 0;
+}
+
+.model-picker-select {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex: 1;
+    min-width: 0;
+    text-align: left;
 }
 
 .pop-menu-row.on {
@@ -7775,4 +7830,76 @@ textarea.notes {
     .dr .dv-hunk {
         scroll-margin-top: 6.4rem;
     }
+}
+
+/* Provider subscription allowances. */
+.subscription-toolbar,
+.subscription-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+.subscription-toolbar {
+    justify-content: flex-start;
+    margin: 1rem 0;
+}
+.subscription-account {
+    padding: 1rem 0;
+    border-top: 1px solid var(--line);
+}
+.subscription-account p {
+    margin: 0.35rem 0;
+}
+.subscription-window {
+    margin-top: 1rem;
+}
+.subscription-meter {
+    height: 0.35rem;
+    overflow: hidden;
+    border-radius: 1rem;
+    background: var(--line);
+    margin: 0.5rem 0;
+}
+.subscription-meter > span {
+    display: block;
+    height: 100%;
+    background: currentColor;
+    opacity: 0.65;
+}
+.subscription-reset {
+    text-align: right;
+    margin-top: 0.2rem;
+}
+
+.fast-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.fast-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.fast-mark {
+    margin-left: 4px;
+}
+
+.voice-learned-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 0;
+    overflow-wrap: anywhere;
+}
+
+.voice-stats p {
+    margin: 2px 0;
 }

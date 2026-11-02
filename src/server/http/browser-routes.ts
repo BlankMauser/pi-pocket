@@ -5,6 +5,7 @@ import { localServers } from "../browser/local-servers.ts";
 import { displayUrl, normalizeUrl } from "../browser/urls.ts";
 import { viewportFrom } from "../browser/viewport.ts";
 import { HttpError } from "../errors.ts";
+import { machinePath } from "../workers.ts";
 import { type ApiRequest, json, readJson } from "./io.ts";
 
 /** What people may do to a conversation's browser page. */
@@ -46,6 +47,10 @@ export async function browserRoutes(
 
     if (!app.browserOn()) {
         throw new HttpError(404, "The browser is off. The owner turns it on in Extensions.");
+    }
+
+    if (machinePath(app.cwdOf(id)) !== undefined) {
+        return remoteRoutes(api, id, action, port);
     }
 
     const browsers = app.browsers;
@@ -207,4 +212,99 @@ export async function browserRoutes(
     } catch (error) {
         readable(error);
     }
+}
+
+/** The same panel protocol, with every page operation executed on the chosen worker. */
+async function remoteRoutes(
+    api: ApiRequest,
+    id: ConversationId,
+    action: string | undefined,
+    port: number,
+): Promise<void> {
+    const { app, request, response, url, user } = api;
+    const key = Number(id);
+    const method = request.method ?? "GET";
+
+    if (action === undefined && method === "GET") {
+        await app.browsers.remote(key, "state");
+
+        return json(response, 200, app.browsers.state(key));
+    }
+
+    if (action === "console" && method === "GET") {
+        return json(response, 200, await app.browsers.remote(key, "console"));
+    }
+
+    if (action === "servers" && method === "GET") {
+        return json(
+            response,
+            200,
+            user.role === "owner"
+                ? await app.browsers.remote(key, "servers", { excludePorts: [port] })
+                : { servers: [] },
+        );
+    }
+
+    if (action === "frame" && method === "GET") {
+        const frame = await app.browsers.remote<{
+            data: string;
+            seq: number;
+            width: number;
+            height: number;
+        } | null>(key, "frame", { after: Number(url.searchParams.get("after") ?? 0) || 0 });
+
+        if (response.destroyed) {
+            return;
+        }
+
+        if (frame === null) {
+            response.writeHead(204, {
+                "cache-control": "no-store",
+                ...(app.browsers.state(key).open ? {} : { "x-closed": "1" }),
+            });
+            response.end();
+
+            return;
+        }
+
+        const bytes = Buffer.from(frame.data, "base64");
+
+        response.writeHead(200, {
+            "content-type": "image/jpeg",
+            "content-length": String(bytes.length),
+            "cache-control": "no-store",
+            "x-seq": String(frame.seq),
+            "x-width": String(frame.width),
+            "x-height": String(frame.height),
+        });
+        response.end(bytes);
+
+        return;
+    }
+
+    if (method !== "POST" || action === undefined || !BROWSER_ACTIONS.has(action)) {
+        throw new HttpError(404, "Unknown browser route");
+    }
+
+    await app.requireDriver(id, user);
+    await app.conversation(id);
+    const body = await readJson<Record<string, unknown>>(request);
+    const result = await app.browsers.remote(key, "action", {
+        action,
+        body,
+        trusted: user.role === "owner",
+    });
+
+    if (action === "navigate") {
+        const target = app.browsers.state(key).url;
+
+        void app.collab.activity(
+            id,
+            user,
+            `opened ${displayUrl(target) || target} in the browser`,
+            false,
+        );
+    }
+
+    return json(response, 200, result);
 }

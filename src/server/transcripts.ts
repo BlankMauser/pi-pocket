@@ -103,6 +103,53 @@ export class Transcripts {
         }, context);
     }
 
+    /**
+     * The last few things said, as short plain text for a model that only needs the topic (dictation cleanup): people's
+     * messages and Pi's replies, newest last, each clipped to its end. Tool output and thinking are left out.
+     */
+    async recentText(id: ConversationId, messages = 6, each = 500, total = 1800): Promise<string> {
+        const conversation = await this.#app.conversation(id);
+        const page = await conversation.entries({}, 24, undefined, context);
+        const lines: string[] = [];
+        let size = 0;
+
+        for (const entry of page.items) {
+            if (lines.length >= messages || size >= total) {
+                break;
+            }
+
+            const message = entry.model?.[0] as { content?: unknown } | undefined;
+            const parts = Array.isArray(message?.content)
+                ? (message.content as { type?: string; text?: unknown }[])
+                : [];
+            let text =
+                typeof message?.content === "string"
+                    ? message.content
+                    : parts
+                          .flatMap((part) => (part.type === "text" ? [String(part.text)] : []))
+                          .join("\n");
+
+            if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") {
+                continue;
+            }
+
+            text = text
+                .replace(/\[from: [^\]]*\]\s*/g, "")
+                .replace(/\s+/g, " ")
+                .trim();
+
+            if (text === "") {
+                continue;
+            }
+
+            text = text.length > each ? `…${text.slice(-each)}` : text;
+            lines.push(`${entry.kind === "pi.user" ? "Person" : "Pi"}: ${text}`);
+            size += text.length;
+        }
+
+        return lines.reverse().join("\n").slice(-total);
+    }
+
     /** Entries before the active context: what compaction or a reset hid from the model. Oldest first. */
     async history(id: ConversationId, before: number, limit = 400): Promise<ClientEntry[]> {
         const conversation = await this.#app.conversation(id);

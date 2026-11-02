@@ -9,7 +9,19 @@ const joined = (folder, name) => `${folder.replace(/\/+$/, "")}/${name.replace(/
 
 /** Whether a failure says a folder is not there yet, and so could be made: only a whole path, as the server makes no other. */
 const notThere = (error, target) =>
-    error.status === 404 && /isn't there/.test(error.message) && /^\s*[~/]/.test(target);
+    error.status === 404 &&
+    /isn't there/.test(error.message) &&
+    /^\s*(?:[~/]|[A-Za-z]:[\\/]|mm:\/\/)/.test(target);
+
+const machineOf = (path) => /^mm:\/\/([^/]+)\//.exec(path ?? "")?.[1];
+
+const physicalPath = (path) => {
+    const actual = path?.replace(/^mm:\/\/[^/]+/, "").replaceAll("\\", "/");
+
+    return /^\/[A-Za-z]:\//.test(actual ?? "") ? actual.slice(1) : actual;
+};
+
+const shownPath = (path, home) => shortPath(physicalPath(path), physicalPath(home));
 
 /** The name of a new folder in `folder`: Enter or Create makes it, Esc or × lets it go. */
 function NewFolder({ folder, onMake, onCancel }) {
@@ -62,6 +74,8 @@ export function CwdSheet({ mode }) {
     const initial =
         mode === "change" ? (view.agent?.cwd ?? server?.defaultCwd) : (server?.defaultCwd ?? "~");
     const [path, setPath] = useState(initial ?? "~");
+    const [machines, setMachines] = useState([]);
+    const [machine, setMachine] = useState(machineOf(initial));
     const [listing, setListing] = useState(null);
     const [hidden, setHidden] = useState(false);
     const [browse, setBrowse] = useState(true);
@@ -71,9 +85,27 @@ export function CwdSheet({ mode }) {
     const [missing, setMissing] = useState(null);
     const useButton = useRef(null);
     const home = listing?.home ?? server?.home;
+    const selectedMachine = machines.find((item) => item.id === machine);
+
+    const folderOnMachine = (target, id = machine) => {
+        if (!id || target.startsWith("mm://")) {
+            return target;
+        }
+
+        const info = machines.find((item) => item.id === id);
+        const root = (info?.home ?? "/").replaceAll("\\", "/");
+
+        target = target.replaceAll("\\", "/");
+        const actual =
+            target === "~" ? root : target.startsWith("~/") ? `${root}/${target.slice(2)}` : target;
+
+        return `mm://${id}${actual.startsWith("/") ? actual : `/${actual}`}`;
+    };
 
     const load = (target, showHidden = hidden) =>
-        api(`fs?path=${encodeURIComponent(target)}${showHidden ? "&hidden=1" : ""}`).then(
+        api(
+            `fs?path=${encodeURIComponent(folderOnMachine(target))}${showHidden ? "&hidden=1" : ""}`,
+        ).then(
             (result) => {
                 setListing(result);
                 setPath(result.path);
@@ -82,7 +114,7 @@ export function CwdSheet({ mode }) {
             (error) => {
                 // A path that is not there yet can be made from here; any other trouble is a notice.
                 if (notThere(error, target)) {
-                    setMissing(target);
+                    setMissing(folderOnMachine(target));
                 } else {
                     notify("error", error.message);
                 }
@@ -91,10 +123,16 @@ export function CwdSheet({ mode }) {
 
     useEffect(() => {
         load(initial ?? "~");
+        api("workers").then(
+            (result) => setMachines(result.workers),
+            () => undefined,
+        );
     }, []);
 
     /** Start the session in a folder (or move this one there), making the folder first when it is not there yet. */
     const use = async (target) => {
+        target = folderOnMachine(target);
+
         try {
             if (missing === target) {
                 await api("fs", { path: target });
@@ -111,7 +149,7 @@ export function CwdSheet({ mode }) {
         } catch (error) {
             // Typed but not there: offer to make it, rather than only saying so.
             if (notThere(error, target)) {
-                setMissing(target);
+                setMissing(folderOnMachine(target));
             } else {
                 notify("error", error.message);
             }
@@ -133,10 +171,31 @@ export function CwdSheet({ mode }) {
         title=${mode === "change" ? "Working directory" : "New session"}
         onClose=${closeSheet}
     >
+        ${
+            machines.length > 0 &&
+            html`<label class="row">
+            <span>Computer</span>
+            <select aria-label="Execution computer" value=${machine ?? ""}
+                onChange=${(event) => {
+                    const id = event.currentTarget.value;
+                    const info = machines.find((item) => item.id === id);
+                    const actual = (info?.cwd ?? info?.home ?? "/").replaceAll("\\", "/");
+                    const next = `mm://${id}${actual.startsWith("/") ? actual : `/${actual}`}`;
+
+                    setMachine(id);
+                    setPath(next);
+                    setListing(null);
+                    load(next);
+                }}>
+                ${machines.map((item) => html`<option value=${item.id}>${item.name}${item.online ? "" : " — offline"}</option>`)}
+            </select>
+        </label>`
+        }
+        ${selectedMachine?.online === false && html`<div class="muted pad">This machine is offline. Connect it before starting work here.</div>`}
         <div class="row">
             <input
                 class="mono"
-                value=${path}
+                value=${physicalPath(path)}
                 onInput=${(event) => {
                     setPath(event.currentTarget.value);
                     setMissing(null);
@@ -153,7 +212,7 @@ export function CwdSheet({ mode }) {
         ${
             missing !== null &&
             html`<div class="folder-missing">
-                <span><span class="mono">${shortPath(missing, home)}</span> isn't there yet.</span>
+                <span><span class="mono">${shownPath(missing, home)}</span> isn't there yet.</span>
                 <button class="button small" onClick=${() => make(missing)}>
                     <${Icon} name="plus" size=${14} /> Create it
                 </button>
@@ -165,8 +224,8 @@ export function CwdSheet({ mode }) {
                 <input type="checkbox" checked=${worktree} onChange=${(event) => setWorktree(event.currentTarget.checked)} /> In a git worktree of its own: a branch, apart from this folder
             </label>`
         }
-        <button class="button primary wide" ref=${useButton} onClick=${() => use(path)}>
-            ${missing === path ? "Create and use" : "Use"} ${shortPath(path, home)}
+        <button class="button primary wide" ref=${useButton} disabled=${selectedMachine?.online === false} onClick=${() => use(path)}>
+            ${missing === folderOnMachine(path) ? "Create and use" : "Use"} ${shownPath(path, home)}
         </button>
         ${
             browse &&
@@ -193,7 +252,7 @@ export function CwdSheet({ mode }) {
                 ${
                     naming &&
                     html`<${NewFolder}
-                        folder=${shortPath(listing.path, home)}
+                        folder=${shownPath(listing.path, home)}
                         onMake=${(name) => make(joined(listing.path, name))}
                         onCancel=${() => setNaming(false)}
                     />`
@@ -220,7 +279,7 @@ export function CwdSheet({ mode }) {
                 ${listing.recent.map(
                     (dir) =>
                         html`<button class="list-item" onClick=${() => use(dir)}>
-                            <span class="mono">${shortPath(dir, listing.home)}</span>
+                            <span class="mono">${shownPath(dir, listing.home)}</span>
                         </button>`,
                 )}
             </div>`

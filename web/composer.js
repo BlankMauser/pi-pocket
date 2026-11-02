@@ -24,6 +24,7 @@ import {
     typing,
     uid,
 } from "./store.js";
+import { learnFromSend, useDictation } from "./dictation.js";
 import { branchAvailable, headLabel } from "./sheets/branch.js";
 import { formatBytes, formatTokens, html, Icon, Marked, modelLabel, Spinner } from "./ui.js";
 
@@ -236,6 +237,7 @@ export function Composer() {
         setPastes(loadPastes(conversationId));
         setBrowsing(null);
         setSearching(false);
+        dictation.cancel();
     }, [conversationId]);
     // Text sent here from the chat, the notes ("Send to Pi"), or another app (Share) goes after whatever is in the box,
     // once: the message box is made again for every session, and must not add the same text there. Shared files are
@@ -303,6 +305,28 @@ export function Composer() {
         // A command is not a message to Pi: no "typing to Pi" for it.
         typing(value.trim() === "" || value.startsWith("/") ? null : "pi");
     };
+
+    // Voice dictation: the words land where the caret was, and typing, sending or leaving the session ends it.
+    const dictation = useDictation({
+        read: () => {
+            const element = box.current;
+
+            return {
+                scope: conversationId,
+                text: drafts.get(conversationId),
+                from: element?.selectionStart ?? 0,
+                to: element?.selectionEnd ?? 0,
+            };
+        },
+        write: (value, at) => {
+            update(value, at);
+            requestAnimationFrame(() => {
+                if (box.current?.value === value) {
+                    box.current.setSelectionRange(at, at);
+                }
+            });
+        },
+    });
 
     // Ctrl+R: what was sent before that has the words in the box.
     const recalled = searching ? searchHistory(text) : [];
@@ -463,6 +487,9 @@ export function Composer() {
         if (!canSend) {
             return;
         }
+
+        learnFromSend(conversationId, text);
+        dictation.cancel();
 
         const full = expandPastes(text, pastes);
 
@@ -1054,6 +1081,7 @@ export function Composer() {
                         value=${text}
                         placeholder=${placeholder}
                         onInput=${(event) => {
+                            dictation.cancel();
                             setBrowsing(null);
                             update(event.currentTarget.value, event.currentTarget.selectionStart);
                         }}
@@ -1064,6 +1092,18 @@ export function Composer() {
                         onPaste=${onPaste}
                         enterkeyhint=${coarse ? "enter" : "send"}
                     ></textarea>
+                    ${
+                        (dictation.available || store.state.me?.role === "owner") &&
+                        html`<div class="voice-bar">
+                            <span role="status" aria-live="polite">
+                                ${dictation.polishing ? "GPT-6 Luna · medium · cleaning…" : dictation.finishing ? "Finishing dictation…" : dictation.listening ? "Listening…" : ""}
+                            </span>
+                            ${dictation.polishing && html`<button class="link small" onClick=${dictation.cancel}>Keep raw</button>`}
+                            ${dictation.hasUndo && html`<button class="link small" onClick=${dictation.undo}>Undo cleanup</button>`}
+                            <span class="grow"></span>
+                            ${store.state.me?.role === "owner" && html`<button class="link small" onClick=${() => openSheet({ type: "voice" })}>Voice settings · Vocabulary</button>`}
+                        </div>`
+                    }
                     <div class="composer-row">
                         <${PlacesButton} />
                         <button
@@ -1083,12 +1123,30 @@ export function Composer() {
                                 event.currentTarget.value = "";
                             }}
                         />
+                        ${
+                            dictation.available &&
+                            html`<button
+                                class=${`icon-button dictate ${dictation.listening ? "on" : ""}`}
+                                aria-label=${dictation.listening ? "Stop dictating" : "Dictate"}
+                                aria-pressed=${dictation.listening}
+                                disabled=${dictation.finishing || dictation.polishing}
+                                title="Dictate with your voice"
+                                onClick=${dictation.toggle}
+                            >
+                                <${Icon} name="mic" />
+                            </button>`
+                        }
                         <button
                             class=${`chip model-chip ${agent?.available === false ? "warn" : ""}`}
                             onClick=${() => openSheet({ type: "model" })}
                         >
                             <span class="glyph">✦</span> ${modelLabel(agent)}
                             ${level && html`<span class="muted"> ${level}</span>`}
+                            ${
+                                agent?.fastCapable &&
+                                store.state.server?.openaiFast &&
+                                html`<span class="fast-mark" title="OpenAI Fast mode is on">⚡</span>`
+                            }
                         </button>
                         ${
                             planAvailable() &&

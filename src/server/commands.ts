@@ -44,6 +44,7 @@ import { expandPromptTemplate, expandSkillCommand } from "./prompts.ts";
 import { clientKey, ownRequest } from "./requests.ts";
 import { type Resend, resendContent, resendRequest, ResendTask, userContent } from "./resend.ts";
 import { wantsTitle, writeTitle } from "./titles.ts";
+import { machineFolder, machinePath } from "./workers.ts";
 import { describeMoment, describeRepeat, knownZone } from "./when.ts";
 import {
     createWorktree,
@@ -111,8 +112,12 @@ function entryIdOf(value: unknown): number {
  * An image file for the model, at most 2000 pixels a side as Pi's read tool sends images: models refuse bigger ones once
  * a conversation holds many, and then every request fails until they leave its context.
  */
-async function modelImage(path: string, mimeType: string): Promise<ImageContent> {
-    const image = await resizeImage(readFileSync(path), mimeType);
+async function modelImage(
+    path: string,
+    mimeType: string,
+    bytes?: Uint8Array,
+): Promise<ImageContent> {
+    const image = await resizeImage(bytes ?? readFileSync(path), mimeType);
 
     if (image === null) {
         throw new Error("it could not be made small enough for the model");
@@ -155,7 +160,7 @@ export class Commands {
         }
 
         const title = optionalText(request.title, "title")?.trim().slice(0, MAX_TITLE) || undefined;
-        const folder = app.workspace.checkDirectory(
+        const folder = await app.workspace.checkWorkingDirectory(
             optionalText(request.cwd, "cwd") ?? app.defaultCwd,
         );
         const initial = this.#defaultModel();
@@ -211,12 +216,38 @@ export class Commands {
             return create({ cwd, skipped: [] });
         }
 
-        const made = await createWorktree(cwd, join(this.#app.dataDir, "worktrees"), label);
+        const remote = machinePath(cwd);
+        const original =
+            remote === undefined
+                ? await createWorktree(cwd, join(this.#app.dataDir, "worktrees"), label)
+                : await this.#app.workers.rpc<Place & { worktree: Worktree }>(
+                      cwd,
+                      "workspace.createWorktree",
+                      { label },
+                  );
+        const made =
+            remote === undefined
+                ? original
+                : {
+                      ...original,
+                      cwd: machineFolder(remote.machineId, original.cwd),
+                      worktree: {
+                          ...original.worktree,
+                          path: machineFolder(remote.machineId, original.worktree.path),
+                          source: cwd,
+                      },
+                  };
 
         try {
             return await create(made);
         } catch (error) {
-            await discardWorktree(made.worktree).catch((cleanup: unknown) =>
+            await (
+                remote === undefined
+                    ? discardWorktree(made.worktree)
+                    : this.#app.workers.rpc(cwd, "workspace.discardWorktree", {
+                          worktree: original.worktree,
+                      })
+            ).catch((cleanup: unknown) =>
                 this.#app.log(`worktree ${made.worktree.path} left behind: ${describe(cleanup)}`),
             );
 
@@ -236,7 +267,11 @@ export class Commands {
             throw new HttpError(404, "This session has no worktree");
         }
 
-        const inside = (cwd: string) => inWorktree(worktree, cwd);
+        const remote = machinePath(worktree.path);
+        const inside = (cwd: string) =>
+            remote === undefined
+                ? inWorktree(worktree, cwd)
+                : cwd === worktree.path || cwd.startsWith(`${worktree.path}/`);
 
         // Anything at work there would lose its folder: this session's runs, its subagents', or another session's.
         if (app.busyConversations().some((busy) => inside(app.cwdOf(busy)))) {
@@ -259,13 +294,41 @@ export class Commands {
             );
         }
 
-        const back = await sourceFolders(worktree);
+        const actualWorktree =
+            remote === undefined
+                ? worktree
+                : {
+                      ...worktree,
+                      path: remote.path,
+                      source: machinePath(worktree.source)!.path,
+                  };
+        const back = remote === undefined ? await sourceFolders(worktree) : undefined;
         const moves = app
             .conversationsOf(id)
             .filter((each) => inside(app.cwdOf(each)))
-            .map((each) => ({ id: each, cwd: back(app.cwdOf(each)) }));
+            .map((each) => ({ id: each, cwd: app.cwdOf(each) }));
 
-        await removeWorktree(worktree, force === true);
+        for (const move of moves) {
+            move.cwd =
+                remote === undefined
+                    ? back!(move.cwd)
+                    : machineFolder(
+                          remote.machineId,
+                          await app.workers.rpc<string>(worktree.source, "workspace.sourceFolder", {
+                              worktree: actualWorktree,
+                              path: machinePath(move.cwd)!.path,
+                          }),
+                      );
+        }
+
+        if (remote === undefined) {
+            await removeWorktree(worktree, force === true);
+        } else {
+            await app.workers.rpc(worktree.source, "workspace.removeWorktree", {
+                worktree: actualWorktree,
+                force: force === true,
+            });
+        }
 
         // The session and its subagents go back to the folders the worktree came from.
         for (const move of moves) {
@@ -382,6 +445,11 @@ export class Commands {
         await app.requireDriver(id, user);
         const conversation = await app.conversation(id);
         const typed = request.text.trim();
+
+        if (machinePath(app.cwdOf(id)) !== undefined) {
+            await app.workers.resources(app.cwdOf(id));
+        }
+
         // `/skill:name request` sends the skill with the request; `/name arguments`, Pi's prompt template of that name.
         const text = typed.startsWith("/skill:")
             ? (expandSkillCommand(typed, app.skillCommands(id)) ?? typed)
@@ -430,7 +498,13 @@ export class Commands {
             }
 
             try {
-                parts.push(await modelImage(file.path, file.mime));
+                parts.push(
+                    await modelImage(
+                        file.path,
+                        file.mime,
+                        await app.workspace.readBytes(user, id, file.path),
+                    ),
+                );
             } catch (error) {
                 app.notice("warning", `Could not attach ${file.name}: ${describe(error)}`, id);
             }
@@ -469,6 +543,49 @@ export class Commands {
         const app = this.#app;
         const parts: (TextContent | ImageContent)[] = [];
         let total = 0;
+
+        if (machinePath(app.cwdOf(id)) !== undefined) {
+            for (const mention of mentionedPaths(text).slice(0, MAX_MENTIONED)) {
+                for (const candidate of mention.candidates) {
+                    try {
+                        const view = await app.workspace.viewFile(id, user, candidate);
+                        const mime = IMAGE_MIME[extname(view.path).toLowerCase()];
+
+                        if (
+                            view.kind === "image" &&
+                            images &&
+                            mime !== undefined &&
+                            view.size <= MAX_INLINE_IMAGE
+                        ) {
+                            parts.push(
+                                await modelImage(
+                                    view.path,
+                                    mime,
+                                    await app.workspace.readBytes(user, id, view.path),
+                                ),
+                            );
+                        } else if (view.kind === "text" && total < MAX_MENTIONED_TOTAL) {
+                            const content = view.text.slice(
+                                0,
+                                Math.min(MAX_MENTIONED_FILE, MAX_MENTIONED_TOTAL - total),
+                            );
+
+                            total += content.length;
+                            parts.push({
+                                type: "text",
+                                text: `<file path="${view.path}">\n${content}\n</file>`,
+                            });
+                        }
+
+                        break;
+                    } catch {
+                        /* An inaccessible mention stays a mention. */
+                    }
+                }
+            }
+
+            return parts;
+        }
 
         for (const mention of mentionedPaths(text).slice(0, MAX_MENTIONED)) {
             let file: string | undefined;
@@ -703,7 +820,9 @@ export class Commands {
             "off") as ModelThinkingLevel;
         const thinkingLevel = model === undefined ? wanted : clampThinkingLevel(model, wanted);
         const cwd =
-            request.cwd === undefined ? undefined : app.workspace.checkDirectory(request.cwd);
+            request.cwd === undefined
+                ? undefined
+                : await app.workspace.checkWorkingDirectory(request.cwd);
 
         await conversation.configure(
             {

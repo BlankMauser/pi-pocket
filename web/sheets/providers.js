@@ -1,6 +1,6 @@
 // Model providers: signing in and out, and the dialog a sign-in uses to ask for a code or a key.
 import { useEffect, useState } from "preact/hooks";
-import { api, attempt, closeSheet, store } from "../store.js";
+import { api, attempt, closeSheet, openSheet, store } from "../store.js";
 import { html, Icon, Loader, Sheet } from "../ui.js";
 
 export function ProvidersSheet() {
@@ -37,6 +37,7 @@ export function ProvidersSheet() {
         <p class="muted small">
             Pi Pocket shares Pi's sign-ins (<span class="mono">~/.pi/agent/auth.json</span>). ${owner ? "" : "Only the owner can change them."}
         </p>
+        ${owner && html`<button class="button small" onClick=${() => openSheet({ type: "subscription-usage" })}>Subscription usage</button>`}
         <label class="search">
             <${Icon} name="search" size=${16} />
             <input
@@ -106,7 +107,12 @@ export function AuthDialog() {
         attempt(async () => {
             await api(`auth/${auth.flowId}/${auth.prompt.id}`, payload);
             setValue("");
-            store.set({ auth: { ...store.state.auth, prompt: null } });
+            const current = store.state.auth;
+
+            // The provider may have sent its next prompt before the HTTP answer completed.
+            if (current?.flowId === auth.flowId && current.prompt?.id === auth.prompt.id) {
+                store.set({ auth: { ...current, prompt: null } });
+            }
         });
 
     const close = () => {

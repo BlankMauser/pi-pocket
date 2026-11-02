@@ -25,6 +25,9 @@ import type { User } from "./config.ts";
 import { describe, HttpError } from "./errors.ts";
 import { FileLists, type FileListing, type FileView, viewFile } from "./files.ts";
 import { displayPath, expandHome } from "./paths.ts";
+import { machineFolder, machinePath } from "./workers.ts";
+import { gzipSync } from "node:zlib";
+import { readFileSync } from "node:fs";
 
 export class Workspace {
     readonly #app: PocketApp;
@@ -61,11 +64,21 @@ export class Workspace {
 
     /** Whether a folder is in a git repository. */
     inRepository(cwd: string): boolean {
+        if (machinePath(cwd) !== undefined) {
+            return this.#app.workers.metadata(cwd).inRepository;
+        }
+
         return this.#gitDir(cwd) !== undefined;
     }
 
     /** What a conversation's folder has checked out, for its view: its repository's HEAD file, read as it is now. */
     head(id: ConversationId): Head | undefined {
+        const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) !== undefined) {
+            return this.#app.workers.metadata(cwd).head;
+        }
+
         const gitDir = this.#gitDir(this.#app.cwdOf(id));
 
         return gitDir === undefined ? undefined : headOf(gitDir);
@@ -77,6 +90,10 @@ export class Workspace {
         this.#app.requireSteer(user);
 
         const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) !== undefined) {
+            return this.#app.workers.rpc(cwd, "workspace.branches");
+        }
 
         if (this.#gitDir(cwd) === undefined) {
             throw new HttpError(404, "This session's folder is not in a git repository.");
@@ -111,6 +128,26 @@ export class Workspace {
         const name =
             typeof request.name === "string" ? request.name.trim() : track && localName(track);
         const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) !== undefined) {
+            if (this.#app.isBusy(id)) {
+                throw new HttpError(409, "Pi is working here: stop it before switching branches.");
+            }
+
+            const changed = await this.#app.workers.rpc<{ branch: string }>(
+                cwd,
+                "workspace.switchBranch",
+                { request },
+            );
+
+            await this.#app.workers.refresh(cwd);
+            const what = `switched the branch to ${changed.branch}`;
+
+            await this.#app.commands.note(id, user, what);
+            await this.#app.collab.activity(id, user, what);
+
+            return changed;
+        }
 
         if (track !== undefined && !(await isRemoteBranch(cwd, track))) {
             throw new HttpError(400, `${track} is not a remote branch here.`);
@@ -150,6 +187,14 @@ export class Workspace {
 
     /** A folder to work in, as its whole path: a 404 when it is not there, so the folder picker can offer to make it. */
     checkDirectory(path: string): string {
+        if (process.env.PI_POCKET_WORKERS_ONLY === "1") {
+            throw new HttpError(400, "Choose an execution machine first.");
+        }
+
+        if (machinePath(path) !== undefined) {
+            throw new HttpError(400, "Machine folders must be checked on their machine.");
+        }
+
         const absolute = resolve(expandHome(path.trim() === "" ? "~" : path.trim()));
         let found;
 
@@ -189,6 +234,10 @@ export class Workspace {
      * one asked for. Returns its path.
      */
     makeFolder(user: User, path: string): string {
+        if (process.env.PI_POCKET_WORKERS_ONLY === "1") {
+            throw new HttpError(400, "Choose an execution machine first.");
+        }
+
         this.#app.requireSteer(user);
 
         if (user.sessions !== undefined) {
@@ -229,8 +278,105 @@ export class Workspace {
         return this.checkDirectory(absolute);
     }
 
+    async checkWorkingDirectory(path: string): Promise<string> {
+        const remote = machinePath(path);
+
+        if (remote === undefined) {
+            return this.checkDirectory(path);
+        }
+
+        const absolute = await this.#app.workers.rpc<string>(path, "workspace.checkDirectory");
+        const result = machineFolder(remote.machineId, absolute);
+
+        await this.#app.workers.refresh(result);
+
+        return result;
+    }
+
+    async makeWorkingFolder(user: User, path: string): Promise<string> {
+        const remote = machinePath(path);
+
+        if (remote === undefined) {
+            return this.makeFolder(user, path);
+        }
+
+        this.#app.requireSteer(user);
+
+        if (user.sessions !== undefined) {
+            throw new HttpError(403, "You were invited to one session.");
+        }
+
+        const absolute = await this.#app.workers.rpc<string>(path, "fs.mkdir");
+
+        return machineFolder(remote.machineId, absolute);
+    }
+
+    #access(id: ConversationId, user: User, path: string) {
+        const cwd = this.#app.cwdOf(id);
+        const remote = machinePath(cwd)!;
+        const target = machinePath(path);
+
+        if (target !== undefined && target.machineId !== remote.machineId) {
+            throw new HttpError(404, "Not found");
+        }
+
+        return {
+            path: target?.path ?? path,
+            restricted: user.role === "viewer" || user.sessions !== undefined,
+            owner: user.role === "owner",
+            lineage: this.#lineage(id).map(String),
+        };
+    }
+
+    async readBytes(user: User, id: ConversationId, path: string): Promise<Buffer> {
+        const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) === undefined) {
+            return readFileSync(this.readableFile(user, id, path));
+        }
+
+        const data = await this.#app.workers.rpc<{ data: string }>(
+            cwd,
+            "fs.readFile",
+            this.#access(id, user, path),
+        );
+
+        return Buffer.from(data.data, "base64");
+    }
+
+    async receiveUpload(id: ConversationId, name: string, bytes: Uint8Array): Promise<string> {
+        const cwd = this.#app.cwdOf(id);
+        const remote = machinePath(cwd);
+
+        if (remote === undefined) {
+            throw new HttpError(400, "This is a local session.");
+        }
+
+        const file = await this.#app.workers.rpc<string>(cwd, "fs.upload", {
+            id: String(id),
+            name,
+            data: Buffer.from(bytes).toString("base64"),
+        });
+
+        return file;
+    }
+
+    async isUpload(id: ConversationId, path: string): Promise<boolean> {
+        const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) === undefined) {
+            return resolve(path).startsWith(this.uploadDirectory(id) + sep);
+        }
+
+        return this.#app.workers.rpc(cwd, "fs.isUpload", { id: String(id), path });
+    }
+
     /** A path as a conversation means it: absolute, `~/…`, or relative to the conversation's working directory. */
     conversationPath(id: ConversationId, path: string): string {
+        if (machinePath(this.#app.cwdOf(id)) !== undefined) {
+            throw new HttpError(400, "Files must be resolved on the execution machine.");
+        }
+
         return resolve(this.#app.cwdOf(id), expandHome(path.trim()));
     }
 
@@ -339,6 +485,18 @@ export class Workspace {
         this.#app.requireSteer(user);
         await this.#app.conversation(id);
 
+        const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) !== undefined) {
+            const list = await this.#app.workers.rpc<Omit<FileListing, "json" | "gzipped">>(
+                cwd,
+                "workspace.fileList",
+            );
+            const json = JSON.stringify(list);
+
+            return { ...list, json, gzipped: async () => gzipSync(json) };
+        }
+
         return this.#files.get(this.#app.cwdOf(id));
     }
 
@@ -354,6 +512,12 @@ export class Workspace {
         this.#app.requireSee(user, id);
         this.#app.requireSteer(user);
         await this.#app.conversation(id);
+        const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) !== undefined) {
+            return this.#app.workers.rpc(cwd, "workspace.viewFile", this.#access(id, user, path));
+        }
+
         let file: string;
 
         try {
@@ -388,11 +552,17 @@ export class Workspace {
             );
         }
 
-        const kind = await revertFile(this.#app.cwdOf(id), path, user.sessions !== undefined).catch(
-            (error: unknown) => {
-                throw new HttpError(409, describe(error));
-            },
-        );
+        const cwd = this.#app.cwdOf(id);
+        const kind = await (
+            machinePath(cwd) === undefined
+                ? revertFile(cwd, path, user.sessions !== undefined)
+                : this.#app.workers.rpc<string>(cwd, "workspace.revertChange", {
+                      path,
+                      onlyHere: user.sessions !== undefined,
+                  })
+        ).catch((error: unknown) => {
+            throw new HttpError(409, describe(error));
+        });
         const what =
             kind === "new" || kind === "added"
                 ? `deleted ${path}, which was new since the last commit`
@@ -406,6 +576,15 @@ export class Workspace {
     async changes(id: ConversationId, user: User): Promise<Changes> {
         this.#app.requireSee(user, id);
         this.#app.requireSteer(user);
+
+        const cwd = this.#app.cwdOf(id);
+
+        if (machinePath(cwd) !== undefined) {
+            return this.#app.workers.rpc(cwd, "workspace.changes", {
+                entries: await this.#app.transcripts.allEntries(id, false),
+                onlyHere: user.sessions !== undefined,
+            });
+        }
 
         // Someone invited to this session only sees the files in its folder, here as in `conversationFile`.
         return changesIn(
@@ -421,6 +600,15 @@ export class Workspace {
         this.#app.requireSteer(user);
 
         try {
+            const cwd = this.#app.cwdOf(id);
+
+            if (machinePath(cwd) !== undefined) {
+                return await this.#app.workers.rpc(cwd, "workspace.changeDiff", {
+                    path,
+                    onlyHere: user.sessions !== undefined,
+                });
+            }
+
             return await diffOf(this.#app.cwdOf(id), path, user.sessions !== undefined);
         } catch (error) {
             throw new HttpError(404, describe(error));
