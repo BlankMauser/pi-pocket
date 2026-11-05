@@ -1,0 +1,49 @@
+docs/extensions.md
+  s_cacff0609fb763::t_b36ce3c02948d0 64
+package-lock.json
+  s_cacff0609fb763::t_eec2d225f73619 17,186,528-619,632-640,642-644,1454-1459,1526,1656,1861,2221,3679,3792-3794,3796
+package.json
+  s_3472be1b2cf028::t_08c4d25487c3e1 39
+src/server/activity.ts
+  s_3472be1b2cf028::t_e7a32839e3b351 1-92
+src/server/app.ts
+  s_3472be1b2cf028::t_7c614ac1bd36ef 9,85,265-273,286,326-327,614-685
+src/server/extensions/machine-activity.ts
+  s_3472be1b2cf028::t_1e5b81a05b0aa6 1-40
+src/server/host.ts
+  s_3472be1b2cf028::t_3390452056814c 114
+src/server/reload.ts
+  s_cacff0609fb763::t_583aecbda306e6 40,56,77
+test/activity-access.test.ts
+  s_3472be1b2cf028::t_936546f3041a40 1-45
+test/activity-native.test.ts
+  s_3472be1b2cf028::t_02f4f4e2b35f22 1-73
+test/activity.test.ts
+  s_3472be1b2cf028::t_49902897aa25d9 1-81
+test/app.test.ts
+  s_cacff0609fb763::t_87dd9271f01253 441
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "43917b03acee4e1b5e21aa0f2e92cee234b62521",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    },
+    "s_cacff0609fb763": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1aa3a-1608-7670-8b48-6494e53e9945",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
