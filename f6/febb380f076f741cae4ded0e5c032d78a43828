@@ -1,0 +1,74 @@
+docs/queue-controls.md
+  s_3472be1b2cf028::t_d3d99fa9997f05 1-36
+  s_3472be1b2cf028::t_9f8d5de6ed4491 37-40
+web/store.js
+  s_3472be1b2cf028::t_98f32f12ea51fd 2710-2711
+test/queue-controls-ui.test.ts
+  s_3472be1b2cf028::t_183f06a8347b73 2-10,32,42,45-46,54-61,70-77,86,95,97-101,137-140,151-156,165-203,205-215,220-255,257-266,271-279,281-305,307-331
+  s_3472be1b2cf028::t_d419e0cb1d04a3 1,11-31,33-41,43-44,47-53,62-69,78-85,87-94,96,102-136,141-150,157-164,204,216-219,256,267-270,280,306,332-333
+test/public-types.ts
+  s_3472be1b2cf028::t_adfaeb37ff1c29 83-84
+src/server/extensions/agent-teams.js
+  s_3472be1b2cf028::t_611bcc05c998b6 9-10,19-22,24,32-35
+  s_3472be1b2cf028::t_77b5c348dff4a5 36
+src/server/app.ts
+  s_3472be1b2cf028::t_2e6d2f623e3bdc 130,1039,1704-1709,1726-1727,1753-1758,1765-1770
+  s_3472be1b2cf028::t_adfaeb37ff1c29 41,43,131,938-939,1693-1703,1710-1725,1728-1752,1759-1764,1771-1776
+  s_3472be1b2cf028::t_b7a498d4301b3d 76
+  s_3472be1b2cf028::t_123e4a6ce3197a 1777-1778
+src/server/host.ts
+  s_3472be1b2cf028::t_adfaeb37ff1c29 10,461-466
+src/server/docs.ts
+  s_3472be1b2cf028::t_2e6d2f623e3bdc 113-119
+test/design-system-ui.test.ts
+  s_3472be1b2cf028::t_92332762dc167b 2553-2557
+web/composer.js
+  s_3472be1b2cf028::t_a0057f497412b5 576,1418,1447
+  s_3472be1b2cf028::t_e896fde74e18f4 1413,1436-1440,1546-1550,1579,1598,1606,1619
+  s_3472be1b2cf028::t_8beab7a55a4e7d 310,317,578-580,970,1018,1409-1412,1414-1417,1419-1435,1441-1446,1530-1545,1551-1554
+  s_3472be1b2cf028::t_8efe3b09bddfa6 1555-1556
+docs/features.md
+  s_3472be1b2cf028::t_f2795a942d5d32 16
+src/server/commands.ts
+  s_3472be1b2cf028::t_a97638409b5f88 7,50,74-76,981,984-1012,1020-1021,1471-1540,1547,1549-1551,1658,1664-1673,1680-1686,1693-1699,1706,1708-1709,1711-1712,1715-1716,1718,1720-1722,1724-1730,1732-1734,1736-1738,1740-1742,1744-1746,1749-1754,1756-1758,1761-1762,1764-1766,1769,1771-1793,1795-1798
+src/server/extensions/agent-teams.ts
+  s_3472be1b2cf028::t_6637b58ede3c21 9,84-86,89-95,110-120,147-183
+src/server/extensions/subagents.ts
+  s_3472be1b2cf028::t_1017a966fbd2f1 24,92-93,99,106-107,118-167,181-241,245-247,781,934,938,980,1068-1071,1076,1220,1226-1229
+src/server/http/conversation-routes.ts
+  s_3472be1b2cf028::t_102226d8ce0981 201-212
+src/server/linked-sessions.ts
+  s_3472be1b2cf028::t_1c3db4e61e5aa7 6,13,68-70,982-988,1001-1013,1147-1148,1155,1167,1170-1171
+src/server/resend.ts
+  s_3472be1b2cf028::t_ddba4ba45695f5 6,10-17,101-114,132-133,137-190,194-197,206,209,213,215-217,220-223,226-229,231-239,242-243,246-259,262,264-268,271-283
+test/agent-teams.test.ts
+  s_3472be1b2cf028::t_2acc75c2e2d044 101
+test/app.test.ts
+  s_3472be1b2cf028::t_d747f1dc15a389 1614,1631-1634
+test/linked-sessions.test.ts
+  s_3472be1b2cf028::t_cb4d078e290e8c 636,639,646
+test/pip-board-ui.test.ts
+  s_3472be1b2cf028::t_c81fc2827d2343 625
+test/queue-controls.test.ts
+  s_3472be1b2cf028::t_f600d33c807daa 1-681
+test/subagent-interrupt.test.ts
+  s_3472be1b2cf028::t_ce886d591ccc37 1-365
+test/team-controls.test.ts
+  s_3472be1b2cf028::t_af5974dc4dc792 1-214
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f6febb380f076f741cae4ded0e5c032d78a43828",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
