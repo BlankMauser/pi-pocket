@@ -300,10 +300,15 @@ function scanInWorker(
     ms: number,
 ): Promise<TokenScan> {
     return new Promise((resolve, reject) => {
-        const worker = new Worker(new URL("./scan-worker.ts", import.meta.url), {
-            workerData: { root, rendered },
-            resourceLimits: { maxOldGenerationSizeMb: WORKER.heapMb },
-        });
+        const worker = new Worker(
+            import.meta.url.includes("$bunfs")
+                ? "./src/server/design/scan-worker.ts"
+                : new URL("./scan-worker.ts", import.meta.url),
+            {
+                workerData: { root, rendered },
+                resourceLimits: { maxOldGenerationSizeMb: WORKER.heapMb },
+            },
+        );
         const timer = setTimeout(
             () => {
                 reject(new Error(STOPPED));

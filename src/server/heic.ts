@@ -98,10 +98,15 @@ function convertInWorker(bytes: Uint8Array): Promise<Uint8Array> {
     const stopped = new Error("the photo took too much time or memory to convert");
 
     return new Promise((resolve, reject) => {
-        const worker = new Worker(new URL("./heic-worker.ts", import.meta.url), {
-            workerData: { bytes },
-            resourceLimits: { maxOldGenerationSizeMb: LIMIT.heapMb },
-        });
+        const worker = new Worker(
+            import.meta.url.includes("$bunfs")
+                ? "./src/server/heic-worker.ts"
+                : new URL("./heic-worker.ts", import.meta.url),
+            {
+                workerData: { bytes },
+                resourceLimits: { maxOldGenerationSizeMb: LIMIT.heapMb },
+            },
+        );
         let outcome: { jpeg: Uint8Array } | { error: Error } | undefined;
         const timer = setTimeout(() => void worker.terminate(), LIMIT.ms);
 

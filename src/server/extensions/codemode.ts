@@ -36,6 +36,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { CodemodeStoreDoc } from "../docs.ts";
+import { boltSandboxOptions } from "../../../.bolt/sandbox.ts";
 import { describe } from "../errors.ts";
 import type { ExtensionWeb, PocketHost } from "../host.ts";
 
@@ -424,6 +425,7 @@ export default function createCodemode(host: PocketHost, web?: ExtensionWeb) {
             };
 
             const sandbox = new CodemodeSandbox({
+                ...boltSandboxOptions(),
                 tools: callable.map((tool) => ({
                     name: tool.name,
                     description: tool.description,

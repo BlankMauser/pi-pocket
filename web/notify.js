@@ -11,7 +11,7 @@ let registering = null;
 
 /** The service worker that shows notifications. Push needs a secure page: https, or localhost. */
 export function registerWorker() {
-    if (!supported || !isSecureContext) {
+    if (hostCan("notify") || !supported || !isSecureContext) {
         return Promise.resolve(null);
     }
 
@@ -131,13 +131,22 @@ export function NotificationsSheet() {
     const [info, setInfo] = useState(null);
     const [subscription, setSubscription] = useState(undefined);
     const [busy, setBusy] = useState(false);
-    const problem = blocker();
+    const native = hostCan("notify");
+    const [nativeOn, setNativeOn] = useState(
+        () => localStorage.getItem("pocket.desktop.notifications") !== "off",
+    );
+    const problem = native ? null : blocker();
 
     useEffect(() => {
         attempt(async () => setInfo(await api("push")));
-        registerWorker()
-            .then((registration) => registration?.pushManager.getSubscription() ?? null)
-            .then(setSubscription, () => setSubscription(null));
+
+        if (native) {
+            setSubscription(null);
+        } else {
+            registerWorker()
+                .then((registration) => registration?.pushManager.getSubscription() ?? null)
+                .then(setSubscription, () => setSubscription(null));
+        }
     }, []);
 
     const enable = () =>
@@ -203,7 +212,22 @@ export function NotificationsSheet() {
             notify("info", "Test sent. It shows as a system notification.");
         });
 
-    const on = Boolean(subscription);
+    const on = native ? nativeOn : Boolean(subscription);
+
+    const toggleNative = () => {
+        localStorage.setItem("pocket.desktop.notifications", on ? "off" : "on");
+        setNativeOn(!on);
+    };
+
+    const testDevice = native
+        ? () =>
+              callHost("notify", {
+                  title: "Pi Pocket",
+                  body: "Native notifications work.",
+                  url: "/",
+                  tag: "desktop-test",
+              })
+        : test;
 
     return html`<${Sheet}
         title="Notifications"
@@ -222,7 +246,7 @@ export function NotificationsSheet() {
                         <div class="extension-main">
                             <div class="extension-title">This device</div>
                             <div class="muted small">
-                                ${on ? "Notifications are on." : "Notifications are off."} ${info.devices > 0 ? `${info.devices} device${info.devices === 1 ? "" : "s"} of yours ${info.devices === 1 ? "gets" : "get"} them.` : ""}
+                                ${on ? "Notifications are on." : "Notifications are off."} ${native ? "Delivered by the desktop app." : info.devices > 0 ? `${info.devices} device${info.devices === 1 ? "" : "s"} of yours ${info.devices === 1 ? "gets" : "get"} them.` : ""}
                             </div>
                         </div>
                         <div class="extension-actions">
@@ -230,7 +254,7 @@ export function NotificationsSheet() {
                                 on=${on}
                                 disabled=${busy || (!on && problem !== null)}
                                 label="Notifications on this device"
-                                onChange=${on ? disable : enable}
+                                onChange=${native ? toggleNative : on ? disable : enable}
                             />
                         </div>
                     </div>
@@ -255,7 +279,7 @@ export function NotificationsSheet() {
                 </div>
                 ${
                     on &&
-                    html`<button class="button wide" onClick=${test}>
+                    html`<button class="button wide" onClick=${testDevice}>
                         Send a test notification
                     </button>`
                 }`

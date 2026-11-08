@@ -5,16 +5,12 @@
  * Kinds are part of the stored data: rename one and old sessions lose it.
  */
 import type { JsonValue } from "@earendil-works/chord";
-import {
-    type CheckpointInfo,
-    type ConversationId,
-    defineDoc,
-    defineDocFamily,
-    type EntryId,
-    type TaskId,
-} from "@earendil-works/pi-durable";
+import type { CheckpointInfo, ConversationId, EntryId, TaskId } from "@earendil-works/pi-durable";
+import { durableSdk } from "./runtime-sdk.ts";
 import type { Repeat } from "./when.ts";
 import type { Worktree } from "./worktrees.ts";
+
+const { defineDoc, defineDocFamily } = durableSdk;
 
 /**
  * Every document here keeps only its current value, so its stored history is one base and the deltas after it, and a

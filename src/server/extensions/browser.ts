@@ -14,6 +14,7 @@ import { displayUrl, normalizeUrl, REMOTE_FILES } from "../browser/urls.ts";
 import { presetOf, viewportFrom } from "../browser/viewport.ts";
 import type { PocketHost } from "../host.ts";
 import { workspaceScheme } from "../paths.ts";
+import { machinePath } from "../workers.ts";
 
 const ACTIONS = [
     "navigate",
@@ -181,6 +182,18 @@ export default function createBrowser(host: PocketHost) {
             const action = args.action as Action;
             const agent = await api.snapshot(AgentDoc, api.conversationId, context);
             const cwd = agent?.cwd ?? process.cwd();
+
+            if (machinePath(cwd) !== undefined) {
+                return await awaitWithContext(
+                    host.browsers.remote<{
+                        output: (TextContent | ImageContent)[];
+                        isError?: boolean;
+                        details: { action: string; url: string; address: string; title: string };
+                    }>(Number(api.conversationId), "tool", { args }),
+                    context,
+                );
+            }
+
             // A page opened again comes back at its last address, unless Pi is about to open another.
             const page = await awaitWithContext(
                 host.browsers.open(Number(api.conversationId), { restore: action !== "navigate" }),

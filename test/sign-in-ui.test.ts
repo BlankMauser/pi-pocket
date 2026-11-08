@@ -434,7 +434,7 @@ test(
         );
         await page.click({ label: "Favorites" });
         await see(
-            `return JSON.stringify(document.querySelectorAll('.pop-menu-row').length === 1 && document.querySelector('.pop-menu-row').getAttribute("title").startsWith("faux/faux-1"))`,
+            `return JSON.stringify(document.querySelectorAll('.pop-menu-row').length === 1 && document.querySelector('.pop-menu-row .model-picker-select')?.getAttribute("title")?.startsWith("faux/faux-1") && document.querySelector('.pop-menu-row button[aria-label="Copy model ID faux/faux-1"]') !== null)`,
             "the ModelPicker favorites results",
         );
         assert.deepEqual(await problems(), []);

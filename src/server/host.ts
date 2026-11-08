@@ -10,7 +10,7 @@ import type {
     TaskId,
     Tx,
 } from "@earendil-works/pi-durable";
-import type { Browsers } from "./browser.ts";
+import type { RoutedBrowsers as Browsers } from "./remote-browser.ts";
 import type { Gallery } from "./gallery.ts";
 import type { Role, User } from "./config.ts";
 import type { Goals } from "./goals.ts";
@@ -19,6 +19,7 @@ import type { Memory } from "./memory.ts";
 import type { Pip } from "./pip.ts";
 import type { PipCompaction } from "./pip-compact.ts";
 import type { Schedules } from "./schedules.ts";
+import type { Workers } from "./workers.ts";
 import type { BackgroundTasks } from "./background.ts";
 import type { Updates } from "./updates.ts";
 import type { RepoWatches } from "./repo-watches.ts";
@@ -400,6 +401,7 @@ export interface PocketHost {
     readonly approvals: Approvals;
     readonly agentDir: string;
     readonly dataDir: string;
+    readonly workers?: Workers;
     /** The running server's Pi Pocket package version, not the extension API level. */
     readonly pocketVersion: string;
     /** Local metadata for an exact provider/modelId; no sign-in check or network request. */
@@ -488,6 +490,7 @@ export interface PocketHost {
      *
      * @experimental In 0.22: it can change in a minor release (docs/extensions/policies/api-stability.md).
      */
+    machineActivity?(source: ConversationId, machineId?: string): Promise<unknown>;
     commandEnv(provider: CommandEnvProvider): () => void;
     /**
      * A session's browser page, the one Pi and people use: opened when `open` is true, else only when it is open
@@ -539,7 +542,7 @@ export interface PocketHost {
     /** Sessions' goals: the goals extension runs their checks and counts them. */
     readonly goals: Pick<Goals, "get" | "run" | "record" | "mayContinue">;
     /** The built-in browser: a page per conversation, which the people in it watch and use too. */
-    readonly browsers: Pick<Browsers, "open">;
+    readonly browsers: Pick<Browsers, "open" | "remote">;
     /** PiP, the owner's assistant: what its tools do, each as PiP's person (`pip.ts`). */
     readonly pip: Pick<
         Pip,

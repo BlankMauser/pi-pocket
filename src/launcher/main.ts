@@ -59,7 +59,8 @@ import {
     yellow,
 } from "./term.ts";
 
-const SERVER = fileURLToPath(new URL("../server/main.ts", import.meta.url));
+const NATIVE_SERVER = process.env.PI_POCKET_NATIVE_SERVER;
+const SERVER = NATIVE_SERVER ?? fileURLToPath(new URL("../server/main.ts", import.meta.url));
 /** Pi Pocket's checkout, which an update from the app changes (`src/server/updates.ts`). */
 const APP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 /**
@@ -591,7 +592,9 @@ function startServer(first: boolean): void {
 
     // Node 22 calls node:sqlite experimental and says so at every start, right above the panel.
     const flags = ["--disable-warning=ExperimentalWarning", ...SERVER_FLAGS];
-    const proc = spawn(process.execPath, [...flags, ...args], {
+    const executable = NATIVE_SERVER ?? process.execPath;
+    const serverArgs = NATIVE_SERVER === undefined ? [...flags, ...args] : args.slice(1);
+    const proc = spawn(executable, serverArgs, {
         stdio: ["ignore", "pipe", "pipe", "ipc"],
         // PI_POCKET_ROLLBACK: this launcher goes back to the version before an update that does not start.
         env: {

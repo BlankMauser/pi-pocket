@@ -1160,6 +1160,7 @@ export function shortPath(path, home) {
 }
 
 const ICONS = {
+    copy: "M9 9h12v12H9zM5 15H3V3h12v2",
     menu: "M3 6h18M3 12h18M3 18h18",
     // PiP: a small orb with a glint.
     pip: "M12 20a8 8 0 100-16 8 8 0 000 16zM8.5 11a3.5 3.5 0 013.5-3.5",
@@ -1168,7 +1169,7 @@ const ICONS = {
     reply: "M9 14L4 9l5-5M4 9h10a6 6 0 016 6v4",
     send: "M12 19V5M5 12l7-7 7 7",
     stop: "M7 7h10v10H7z",
-    mic: "M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3zM19 11a7 7 0 01-14 0M12 18v3",
+    mic: "M12 3a3 3 0 00-3 3v6a3 3 0 006 0V6a3 3 0 00-3-3zM6 11a6 6 0 0012 0M12 17v4M9 21h6",
     clip: "M21 11.5l-8.6 8.6a5 5 0 01-7.1-7.1l8.6-8.6a3.3 3.3 0 014.7 4.7l-8.6 8.6a1.7 1.7 0 01-2.4-2.4l7.9-7.9",
     plus: "M12 5v14M5 12h14",
     artifact: "M4 5h16v14H4zM4 9h16M8 5v4",

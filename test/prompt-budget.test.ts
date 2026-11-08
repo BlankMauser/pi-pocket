@@ -8,7 +8,8 @@ import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai/providers/
  * Opus 5.5), not 4. A guard against a prompt that grows by accident, not a squeeze: a rule that makes the work better
  * is worth its tokens, and the pull request that needs more raises it.
  */
-const LIMIT = 14_000;
+// This fork adds its Fast-mode and machine-context sections.
+const LIMIT = 15_000;
 /** Pi's own tools, and the owner's AGENTS.md and skills: not Pi Pocket's to count. */
 const NOT_OURS = new Set(["read", "bash", "edit", "write", "project_context", "skills"]);
 

@@ -5,7 +5,8 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The repository root: `web/` and `src/` live here, and `node_modules/` too, except in an npx or local install. */
-export const APP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+export const APP_ROOT =
+    process.env.PI_POCKET_APP_ROOT ?? fileURLToPath(new URL("../..", import.meta.url));
 
 /**
  * The node_modules folder with the package `name`, as Node looks for it from `from`: Pi Pocket's own, or one above
@@ -91,6 +92,8 @@ interface PocketConfig {
     lastModel?: ModelChoice;
     /** The model and thinking level new sessions start with, as the owner chose; absent: the last one picked. */
     defaultModel?: ModelChoice;
+    /** OpenAI priority tier chosen by the owner; applies to Responses and Codex. */
+    openaiFast?: boolean;
     /** The theme and colors of browsers that have not chosen their own (`theme.js`), as the owner chose; absent: Pocket. */
     themeDefault?: ThemeDefault;
     /** Extension modules (file names in `src/server/extensions/`) the owner turned off. */
@@ -298,6 +301,20 @@ export class ConfigStore {
 
     get approvalRule(): ApprovalRule {
         return this.#config.approvals ?? "anyone";
+    }
+
+    get openaiFast(): boolean {
+        return this.#config.openaiFast === true;
+    }
+
+    set openaiFast(on: boolean) {
+        if (on) {
+            this.#config.openaiFast = true;
+        } else {
+            delete this.#config.openaiFast;
+        }
+
+        this.save();
     }
 
     set approvalRule(rule: ApprovalRule) {

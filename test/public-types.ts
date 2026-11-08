@@ -78,7 +78,9 @@ type Internal =
     | "goals"
     | "browsers"
     | "memory"
-    | "toolNames";
+    | "toolNames"
+    | "workers"
+    | "machineActivity";
 
 type PublicHost = Pick<PocketHost, keyof Host>;
 

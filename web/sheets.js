@@ -29,8 +29,10 @@ import { HooksSheet } from "./sheets/hooks.js";
 import { SchedulesSheet } from "./sheets/schedules.js";
 import { SessionSheet } from "./sheets/session.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
+import { SubscriptionUsageSheet } from "./sheets/subscription-usage.js";
 import { SpendSheet } from "./sheets/spend.js";
 import { TextSheet } from "./sheets/text.js";
+import { VoiceSheet } from "./sheets/voice.js";
 import {
     ArtifactsSheet,
     ArtifactShareSheet,
@@ -195,6 +197,9 @@ function sheetBody(sheet) {
         case "model":
             body = html`<${ModelPicker} />`;
             break;
+        case "voice":
+            body = me?.role === "owner" ? html`<${VoiceSheet} />` : null;
+            break;
         case "branch":
             body = view.conversation ? html`<${BranchPicker} />` : null;
             break;
@@ -328,6 +333,9 @@ function sheetBody(sheet) {
             body = view.conversation
                 ? html`<${FindSheet} key=${view.conversation.id} initial=${sheet.query ?? ""} />`
                 : null;
+            break;
+        case "subscription-usage":
+            body = me?.role === "owner" ? html`<${SubscriptionUsageSheet} />` : null;
             break;
         case "spend":
             body = html`<${SpendSheet} />`;

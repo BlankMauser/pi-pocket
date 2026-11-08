@@ -1,3 +1,4 @@
+import { activityInstance, attributedEnv, attributedTool } from "./activity.ts";
 /**
  * The Pi Pocket server core: one durable Harness over one SQLite file, shared by every session, every subagent, and
  * every connected browser. Browsers attach to a conversation's committed view; nothing a browser sees exists only in
@@ -47,7 +48,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Alerts } from "./alerts.ts";
 import { Attribution, type Missing } from "./attribution.ts";
-import { Browsers } from "./browser.ts";
+import { RoutedBrowsers as Browsers } from "./remote-browser.ts";
 import type { BrowserState } from "./browser/page.ts";
 import { Collab, REACTIONS } from "./collab.ts";
 import { Commands } from "./commands.ts";
@@ -95,6 +96,8 @@ import {
 } from "./host.ts";
 import { type GuardStatus, LancetGuard } from "./lancet.ts";
 import { takeLock } from "./lock.ts";
+import { installFastMode } from "./fast-mode.ts";
+import { installAccountOAuth } from "./account-oauth.ts";
 import { Memory } from "./memory.ts";
 import { isThinkingLevel, modelInfo, modelList, resolveModel, THINKING_LEVELS } from "./models.ts";
 import { Updates } from "./updates.ts";
@@ -153,6 +156,7 @@ import { Spend } from "./spend.ts";
 import { Transcripts } from "./transcripts.ts";
 import { Watches } from "./watches.ts";
 import { Workspace } from "./workspace.ts";
+import { machineFolder, machinePath, Workers } from "./workers.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -412,6 +416,7 @@ export class PocketApp {
     readonly attribution = new Attribution(this);
     /** The conversation's folder: files, the viewer, changes, and uploads. */
     readonly workspace = new Workspace(this);
+    readonly workers = new Workers(() => this.dataDir);
     /** The conversation's stored history, as people read it. */
     readonly transcripts = new Transcripts(this);
     /** Pi's sessions from the terminal, which the owner can continue here. */
@@ -571,39 +576,43 @@ export class PocketApp {
             file: join(options.dataDir, "provider-limits.json"),
             ...(options.limits === undefined ? {} : { tuning: options.limits }),
         });
-        this.browsers = new Browsers({
-            dataDir: options.dataDir,
-            ...(options.browser === undefined ? {} : { executable: options.browser }),
-            log: (line) => this.#log(line),
-            load: async (id) =>
-                (await this.harness.snapshot(
-                    BrowserDoc,
-                    id as unknown as ConversationId,
-                    context,
-                )) ?? undefined,
-            save: (id, saved) => {
-                void this.harness
-                    .commit(async (tx) => {
-                        const doc = await tx.doc(BrowserDoc, id as unknown as ConversationId);
+        this.browsers = new Browsers(
+            {
+                dataDir: options.dataDir,
+                ...(options.browser === undefined ? {} : { executable: options.browser }),
+                log: (line) => this.#log(line),
+                load: async (id) =>
+                    (await this.harness.snapshot(
+                        BrowserDoc,
+                        id as unknown as ConversationId,
+                        context,
+                    )) ?? undefined,
+                save: (id, saved) => {
+                    void this.harness
+                        .commit(async (tx) => {
+                            const doc = await tx.doc(BrowserDoc, id as unknown as ConversationId);
 
-                        if (saved.url !== undefined && doc.url !== saved.url) {
-                            doc.url = saved.url;
-                        }
+                            if (saved.url !== undefined && doc.url !== saved.url) {
+                                doc.url = saved.url;
+                            }
 
-                        const viewport = saved.viewport;
+                            const viewport = saved.viewport;
 
-                        if (
-                            viewport !== undefined &&
-                            JSON.stringify(doc.viewport) !== JSON.stringify(viewport)
-                        ) {
-                            doc.viewport = { ...viewport };
-                        }
-                    }, context)
-                    .catch((error: unknown) =>
-                        this.#log(`browser page not saved: ${describe(error)}`),
-                    );
+                            if (
+                                viewport !== undefined &&
+                                JSON.stringify(doc.viewport) !== JSON.stringify(viewport)
+                            ) {
+                                doc.viewport = { ...viewport };
+                            }
+                        }, context)
+                        .catch((error: unknown) =>
+                            this.#log(`browser page not saved: ${describe(error)}`),
+                        );
+                },
             },
-        });
+            this.workers,
+            (id) => this.cwdOf(id as unknown as ConversationId),
+        );
         this.themes = new Themes({
             builtIn: join(APP_ROOT, "web", "themes"),
             dataDir: options.dataDir,
@@ -829,15 +838,38 @@ export class PocketApp {
         this.cacheKeeper.installPayloadObserver(this.models);
         installRequestShaping(this.models, this.#shapers, this.#log);
         this.providers.modelRefresh.watch(this.models);
+        installAccountOAuth(this.models);
         this.#configureModels?.(this.models);
+        installFastMode(this.models, () => this.config.openaiFast);
         measureModelStreams(this.models);
         // Outside the timing wrapper: each attempt is timed on its own, not the wait before it.
         this.limits.install(this.models);
         // Outermost: it sees each real request finish, and replays it through the wrappers below.
         this.cacheKeeper.install(this.models);
         await this.models.getAvailable().catch(() => []);
+        this.providers.watchConfig();
 
         const registry = createRegistry();
+        const install = registry.install.bind(registry);
+
+        registry.install = (extension) => {
+            // Extensions may expose live getters (Codemode's wraps changes with its mode).
+            // Preserve them rather than snapshotting their values through object spread.
+            const wrapped = Object.create(
+                Object.getPrototypeOf(extension),
+                Object.getOwnPropertyDescriptors(extension),
+            );
+
+            if ("tools" in extension) {
+                Object.defineProperty(wrapped, "tools", {
+                    configurable: true,
+                    enumerable: true,
+                    get: () => extension.tools?.map(attributedTool),
+                });
+            }
+
+            return install(wrapped);
+        };
 
         registry.install(CodingTools);
         // Durable work of the app itself, whatever extension modules are on.
@@ -868,6 +900,7 @@ export class PocketApp {
             approvals: this.approvals,
             agentDir: getAgentDir(),
             dataDir: this.dataDir,
+            workers: this.workers,
             pocketVersion: pocketVersion(),
             modelInfo: (spec) => modelInfo(this.models, spec),
             skillPaths: () => {
@@ -898,6 +931,7 @@ export class PocketApp {
             },
             fetchPublic: createPublicFetch(),
             requesterOf: (conversationId) => this.attribution.requesterOf(conversationId),
+            machineActivity: (source, machineId) => this.machineActivity(source, machineId),
             roleOf: (personId) => this.config.userById(personId)?.role,
             on: (event, listener) => this.events.on(event, listener),
             ask: (request, askContext) => ask(this.approvals, request, askContext),
@@ -1558,6 +1592,12 @@ export class PocketApp {
     }
 
     async resolveCwd(cwd: string, signal?: AbortSignal): Promise<string> {
+        if (machinePath(cwd) !== undefined) {
+            signal?.throwIfAborted();
+
+            return this.workspace.checkWorkingDirectory(cwd);
+        }
+
         const scheme = this.workspaceScheme(cwd);
 
         if (scheme === undefined) {
@@ -1601,13 +1641,88 @@ export class PocketApp {
 
     /** A folder's environment, with what extensions add to each command and hide from its output in this session. */
     #wrapped(id: ConversationId, cwd: string): ExecutionEnv {
-        return wrapEnv(this.#env(cwd), Number(id), cwd, this.commandEnvs, this.hidden);
+        return wrapEnv(this.#attributed(id, cwd), Number(id), cwd, this.commandEnvs, this.hidden);
+    }
+
+    #activityId: string | undefined;
+    #activityCapabilities = new Map<string, Promise<{ node: string; runner: string }>>();
+
+    #attributed(id: ConversationId, cwd: string): ExecutionEnv {
+        const base = this.#env(cwd);
+        const machine = machinePath(cwd);
+
+        if (machine === undefined) {
+            return base;
+        }
+
+        this.#activityId ??= activityInstance(this.dataDir);
+        const parent = this.parentOf(id);
+
+        return attributedEnv(
+            base,
+            {
+                POCKET_INSTANCE_ID: this.#activityId,
+                POCKET_CONVERSATION_ID: String(id),
+                POCKET_MACHINE_ID: machine.machineId,
+                ...(parent === undefined ? {} : { POCKET_PARENT_CONVERSATION_ID: String(parent) }),
+            },
+            () => {
+                let pending = this.#activityCapabilities.get(machine.machineId);
+
+                if (pending === undefined) {
+                    pending = this.workers.rpc<{ node: string; runner: string }>(
+                        cwd,
+                        "activity.capabilities",
+                    );
+                    this.#activityCapabilities.set(machine.machineId, pending);
+                    pending.catch(() => this.#activityCapabilities.delete(machine.machineId));
+                }
+
+                return pending;
+            },
+        );
+    }
+
+    async machineActivity(source: ConversationId, requestedMachine?: string): Promise<unknown> {
+        const requester = this.config.users.find(
+            (user) => user.id === this.attribution.requesterOf(source),
+        );
+
+        if (requester === undefined || !this.canSee(requester, source)) {
+            throw new Error("Session access required");
+        }
+
+        const machineId = requestedMachine ?? machinePath(this.cwdOf(source))?.machineId;
+        const machine = (await this.workers.list()).find((item) => item.id === machineId);
+
+        if (machine === undefined || !machine.online) {
+            throw new Error("Machine is unavailable");
+        }
+
+        // Results become part of this conversation. Every reader of the source
+        // must also be permitted to see each attributed conversation.
+        const readers = this.config.users.filter((user) => this.canSee(user, source));
+        const visible = [...this.#agents.keys()].filter((id) =>
+            readers.every((user) => this.canSee(user, id)),
+        );
+
+        this.#activityId ??= activityInstance(this.dataDir);
+        const cwd = machineFolder(machine.id, machine.cwd ?? machine.home ?? "/");
+
+        return this.workers.rpc(cwd, "activity.snapshot", {
+            instanceId: this.#activityId,
+            conversationIds: visible.map(String),
+        });
     }
 
     #env(cwd: string): ExecutionEnv {
+        if (process.env.PI_POCKET_WORKERS_ONLY === "1" && machinePath(cwd) === undefined) {
+            throw new HttpError(400, "Choose a computer for this session's work.");
+        }
+
         const scheme = this.workspaceScheme(cwd);
 
-        if (scheme !== undefined) {
+        if (scheme !== undefined && machinePath(cwd) === undefined) {
             const provider = this.#workspaceProviders.get(scheme)?.at(-1)?.provider;
 
             if (provider === undefined) {
@@ -1620,7 +1735,10 @@ export class PocketApp {
         let env = this.#envs.get(cwd);
 
         if (env === undefined) {
-            env = new NodeExecutionEnv({ cwd });
+            env =
+                machinePath(cwd) === undefined
+                    ? new NodeExecutionEnv({ cwd })
+                    : this.workers.env(cwd);
             this.#envs.set(cwd, env);
         }
 
@@ -2635,6 +2753,7 @@ export class PocketApp {
                 collab: 2,
                 reactions: REACTIONS,
                 approvalRule: this.config.approvalRule,
+                openaiFast: this.config.openaiFast,
                 // The model and thinking level new sessions start with, or null for the last one picked.
                 defaultModel: this.config.defaultModel ?? null,
                 // The theme and colors of browsers that have not chosen their own, or null for the app's own.
@@ -3536,6 +3655,10 @@ export class PocketApp {
 
     /** Pi's skills in a conversation's folder, to run as `/skill:name`. */
     skillCommands(id: ConversationId): SkillCommand[] {
+        if (machinePath(this.cwdOf(id)) !== undefined) {
+            return this.workers.cachedResources(this.cwdOf(id))?.commands ?? [];
+        }
+
         try {
             return this.skills(this.cwdOf(id)).map((skill) => ({
                 name: skill.name,
@@ -3550,6 +3673,10 @@ export class PocketApp {
 
     /** Pi's prompt templates, as a conversation in its folder offers them. */
     promptTemplates(id: ConversationId): PromptTemplate[] {
+        if (machinePath(this.cwdOf(id)) !== undefined) {
+            return this.workers.cachedResources(this.cwdOf(id))?.templates ?? [];
+        }
+
         let paths: string[] = [];
 
         try {
@@ -3695,6 +3822,30 @@ export class PocketApp {
         } finally {
             await this.#refreshClients();
         }
+    }
+
+    /** The owner turns OpenAI Fast (priority) requests on or off for every OpenAI model here. */
+    async setOpenAiFast(user: User, on: unknown): Promise<void> {
+        if (user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can do that");
+        }
+
+        if (typeof on !== "boolean") {
+            throw new HttpError(400, "openaiFast must be true or false");
+        }
+
+        if (on === this.config.openaiFast) {
+            return;
+        }
+
+        this.config.openaiFast = on;
+        await this.#refreshClients();
+        this.notice(
+            "info",
+            on
+                ? `${user.name} turned on OpenAI Fast mode. It may use more quota.`
+                : `${user.name} turned off OpenAI Fast mode.`,
+        );
     }
 
     /**

@@ -460,7 +460,7 @@ function actionItems() {
                 icon: "external",
                 run: () => openSheet({ type: "hooks" }),
             },
-        me?.role === "owner" && {
+        {
             label: "Providers",
             detail: "sign in to model providers",
             icon: "key",
@@ -483,6 +483,13 @@ function actionItems() {
             run: () => openSheet({ type: "gallery" }),
         },
         { label: "Spend", icon: "pulse", run: () => openSheet({ type: "spend" }) },
+        me?.role === "owner" && {
+            label: "Subscription usage",
+            detail: "allowances and reset times",
+            keywords: "limits quota",
+            icon: "pulse",
+            run: () => openSheet({ type: "subscription-usage" }),
+        },
         collab()
             ? {
                   label: "People and invites",

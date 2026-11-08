@@ -32,7 +32,21 @@ const joined = (folder, name) => `${folder.replace(/\/+$/, "")}/${name.replace(/
 
 /** Whether a failure says a folder is not there yet, and so could be made: only a whole path, as the server makes no other. */
 const notThere = (error, target) =>
-    error.status === 404 && /isn't there/.test(error.message) && /^\s*[~/]/.test(target);
+    error.status === 404 &&
+    /isn't there/.test(error.message) &&
+    /^\s*(?:[~/]|[A-Za-z]:[\\/]|mm:\/\/)/.test(target);
+
+/** The machine a `mm://machine/path` folder is on (remote execution workers), if any. */
+const machineOf = (path) => /^mm:\/\/([^/]+)\//.exec(path ?? "")?.[1];
+
+/** A folder's path on its own machine, without the `mm://machine` prefix (and a Windows drive's leading slash). */
+const physicalPath = (path) => {
+    const actual = path?.replace(/^mm:\/\/[^/]+/, "").replaceAll("\\", "/");
+
+    return /^\/[A-Za-z]:\//.test(actual ?? "") ? actual.slice(1) : actual;
+};
+
+const shownPath = (path, home) => shortPath(physicalPath(path), physicalPath(home));
 
 /** A folder's name: the last part of its path, or ~ for home and / for the root. */
 function nameOf(path, home) {
@@ -65,7 +79,7 @@ export function recentLabels(paths, home) {
     return paths.map((path, index) =>
         names.indexOf(names[index]) === names.lastIndexOf(names[index])
             ? names[index]
-            : shortPath(path, home).split("/").slice(-2).join("/"),
+            : shownPath(path, home).split("/").slice(-2).join("/"),
     );
 }
 
@@ -132,6 +146,9 @@ export function CwdSheet({ mode, fromList = false }) {
             ? server.defaultCwd
             : (view.agent?.cwd ?? server?.defaultCwd ?? "~");
     const [listing, setListing] = useState(null);
+    // Computers Pi can work on (`/api/workers`), and the one the folder is on.
+    const [machines, setMachines] = useState([]);
+    const [machine, setMachine] = useState(machineOf(initial));
     const [failed, setFailed] = useState(null);
     // The folder a click selected (mouse only): Open takes it over the one you are in.
     const [selected, setSelected] = useState(null);
@@ -159,17 +176,38 @@ export function CwdSheet({ mode, fromList = false }) {
     const target = selected ?? folder;
     const here = changing && target !== null && target === view.agent?.cwd;
 
+    const selectedMachine = machines.find((item) => item.id === machine);
+
+    /** A folder as the server names it: on the chosen computer, `mm://machine/path`, when it is not already. */
+    const folderOnMachine = (path, id = machine) => {
+        if (!id || path.startsWith("mm://")) {
+            return path;
+        }
+
+        const info = machines.find((item) => item.id === id);
+        const root = (info?.home ?? "/").replaceAll("\\", "/");
+
+        path = path.replaceAll("\\", "/");
+        const actual =
+            path === "~" ? root : path.startsWith("~/") ? `${root}/${path.slice(2)}` : path;
+
+        return `mm://${id}${actual.startsWith("/") ? actual : `/${actual}`}`;
+    };
+
     /** Show a folder; `select`, a folder in it to select (the one stepped up from, with a mouse). */
     const load = (path, { showHidden = hidden, select = null } = {}) => {
         const ask = ++asked.current;
 
-        return api(`fs?path=${encodeURIComponent(path)}${showHidden ? "&hidden=1" : ""}`).then(
+        return api(
+            `fs?path=${encodeURIComponent(folderOnMachine(path))}${showHidden ? "&hidden=1" : ""}`,
+        ).then(
             (result) => {
                 if (ask !== asked.current) {
                     return;
                 }
 
                 setListing(result);
+                setMachine(machineOf(result.path));
                 setFailed(null);
                 setSelected(touch ? null : select);
                 setMissing(null);
@@ -183,7 +221,7 @@ export function CwdSheet({ mode, fromList = false }) {
 
                 // A favorite that does not open, however, gets the banner, which can remove it.
                 if (notThere(error, path) || store.state.folderFavorites.includes(path)) {
-                    setMissing(path);
+                    setMissing(folderOnMachine(path));
                     setMissingWhy(notThere(error, path) ? null : error.message);
                     setEditing(null);
                 } else if (listing) {
@@ -197,6 +235,10 @@ export function CwdSheet({ mode, fromList = false }) {
 
     useEffect(() => {
         load(initial);
+        api("workers").then(
+            (result) => setMachines(result.workers),
+            () => undefined,
+        );
     }, []);
 
     // A new folder shows from its top, or with the selected one in view; its path shows to its end. Keys go to the
@@ -234,7 +276,7 @@ export function CwdSheet({ mode, fromList = false }) {
     /** Make a folder and go into it: Open starts there. */
     const make = async (path) => {
         try {
-            const made = await api("fs", { path });
+            const made = await api("fs", { path: folderOnMachine(path) });
 
             await load(made.path);
         } catch (error) {
@@ -244,6 +286,10 @@ export function CwdSheet({ mode, fromList = false }) {
 
     /** Start the session in the folder Open names (or a favorite's), or move this one there. */
     const use = async (path = target) => {
+        if (path !== null) {
+            path = folderOnMachine(path);
+        }
+
         if (path === null || starting.current || (changing && path === view.agent?.cwd)) {
             return;
         }
@@ -355,7 +401,8 @@ export function CwdSheet({ mode, fromList = false }) {
     };
 
     /** A path typed: whole, or from the folder you are in. */
-    const goTo = (text) => load(/^[~/]/.test(text) ? text : joined(folder, text));
+    const goTo = (text) =>
+        load(/^(?:[~/]|[A-Za-z]:[\\/]|mm:\/\/)/.test(text) ? text : joined(folder, text));
 
     // The list's keys, as a file dialog's: arrows select, Enter goes into the selected folder (or opens the one you are
     // in), Ctrl+Enter opens, Backspace goes up, letters jump to a folder, and / or ~ starts a path.
@@ -420,7 +467,13 @@ export function CwdSheet({ mode, fromList = false }) {
         }
     };
 
-    const crumbs = folder === null ? [] : crumbsOf(folder, home);
+    const crumbs =
+        folder === null
+            ? []
+            : crumbsOf(physicalPath(folder), physicalPath(home)).map((crumb) => ({
+                  ...crumb,
+                  path: folderOnMachine(crumb.path, machineOf(folder) ?? machine),
+              }));
     const recent = (listing?.recent ?? []).filter((path) => !favorites.includes(path));
     const favoriteLabels = recentLabels(favorites, home);
     const labels = recentLabels(recent, home);
@@ -443,7 +496,7 @@ export function CwdSheet({ mode, fromList = false }) {
         key=${path}
         type="button"
         class=${`fp-place ${path === folder ? "on" : ""}`}
-        title=${shortPath(path, home)}
+        title=${shownPath(path, home)}
         aria-current=${path === folder ? "location" : undefined}
         onClick=${() => load(path)}
     >
@@ -471,6 +524,39 @@ export function CwdSheet({ mode, fromList = false }) {
         wide=${true}
         className="folder-sheet"
     >
+        ${
+            machines.length > 0 &&
+            html`<label class="row">
+                <span>Computer</span>
+                <select
+                    aria-label="Execution computer"
+                    value=${machine ?? ""}
+                    onChange=${(event) => {
+                        const id = event.currentTarget.value;
+                        const info = machines.find((item) => item.id === id);
+                        const actual = (info?.cwd ?? info?.home ?? "/").replaceAll("\\", "/");
+                        const next = `mm://${id}${actual.startsWith("/") ? actual : `/${actual}`}`;
+
+                        setMachine(id);
+                        setSelected(null);
+                        load(next);
+                    }}
+                >
+                    ${machines.map(
+                        (item) =>
+                            html`<option value=${item.id}>
+                                ${item.name}${item.online ? "" : " — offline"}
+                            </option>`,
+                    )}
+                </select>
+            </label>`
+        }
+        ${
+            selectedMachine?.online === false &&
+            html`<div class="muted pad">
+                This machine is offline. Connect it before starting work here.
+            </div>`
+        }
         <div class="fp-bar">
             <button
                 type="button"
@@ -547,7 +633,7 @@ export function CwdSheet({ mode, fromList = false }) {
             missing !== null &&
             html`<div class="folder-missing">
                 <span>
-                    ${missingWhy ?? html`<span class="mono">${shortPath(missing, home)}</span> isn't there.`}
+                    ${missingWhy ?? html`<span class="mono">${shownPath(missing, home)}</span> isn't there.`}
                 </span>
                 <span class="fp-missing-actions">
                     ${
@@ -664,9 +750,9 @@ export function CwdSheet({ mode, fromList = false }) {
             </div>
         </div>
         <div class="fp-foot">
-            <div class="fp-target" title=${target ? shortPath(target, home) : ""}>
+            <div class="fp-target" title=${target ? shownPath(target, home) : ""}>
                 <span class="muted">Folder:</span>
-                <span class="mono">${target ? shortPath(target, home) : "…"}</span>
+                <span class="mono">${target ? shownPath(target, home) : "…"}</span>
                 ${
                     mayStar &&
                     target !== null &&
@@ -708,7 +794,7 @@ export function CwdSheet({ mode, fromList = false }) {
                     type="button"
                     class="button primary"
                     title=${touch ? undefined : "Ctrl+Enter"}
-                    disabled=${target === null || busy || here}
+                    disabled=${target === null || busy || here || selectedMachine?.online === false}
                     onClick=${() => use()}
                 >
                     ${here ? "Already here" : changing ? "Move here" : "Open"}

@@ -1,8 +1,9 @@
 /**
- * Native drop-in imports retain the pre-1.4 document checkpoint default without changing Pi Durable itself, and get
- * TypeBox's `Type` from `@earendil-works/pi-ai` as before Pi 1.5.
+ * Native drop-in imports retain the pre-1.4 document checkpoint default without changing Pi Durable itself. On Node a
+ * module hook gives drop-ins the compat namespace; Bun has no `registerHooks`, so the native build's SDK bridge serves
+ * it at `NATIVE_COMPAT_ADDRESS` instead (`build-pocket-bolt.py`).
  */
-import { registerHooks } from "node:module";
+import * as nodeModule from "node:module";
 import { sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -40,8 +41,8 @@ export function documentImports(directory: string, report: (message: string) => 
 
     scopes.set(folder, scope);
 
-    if (!registered) {
-        registerHooks({
+    if (!registered && typeof nodeModule.registerHooks === "function") {
+        nodeModule.registerHooks({
             resolve(specifier, context, nextResolve) {
                 const parent =
                     context.parentURL === undefined ? undefined : ownerOf(context.parentURL);
@@ -106,10 +107,42 @@ export function documentImports(directory: string, report: (message: string) => 
     };
 }
 
+/**
+ * The compat namespace's address in the native build, where Bun's resolver gives every module loaded at run time (the
+ * drop-ins, and built-ins edited since the build) one namespace and does not say which module imports it. It names no
+ * folder, so a missing policy is reported to the first loader with a drop-in folder.
+ */
+export const NATIVE_COMPAT_ADDRESS = `${compatUrl}?module=${encodeURIComponent("a drop-in extension")}`;
+
+/**
+ * Copy a missing policy, including frozen definitions, without changing any stored document semantics. `address` is the
+ * compat namespace's, which says whose definition it is.
+ */
+export function checkpointDefault<
+    T extends { readonly kind: string; readonly checkpointWhen?: unknown },
+>(definition: T, address: string): T {
+    if (definition.checkpointWhen !== undefined) {
+        return definition;
+    }
+
+    reportCheckpointDefault(address, definition.kind);
+
+    return Object.create(Object.getPrototypeOf(definition), {
+        ...Object.getOwnPropertyDescriptors(definition),
+        checkpointWhen: {
+            value: () => false,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+        },
+    }) as T;
+}
+
 /** Report each missing policy once per module and document kind in this loader. */
 export function reportCheckpointDefault(compatModule: string, kind: string): void {
     const url = new URL(compatModule);
-    const scope = scopes.get(url.searchParams.get("folder") ?? "");
+    const folder = url.searchParams.get("folder");
+    const scope = folder === null ? scopes.values().next().value : scopes.get(folder);
     const module = url.searchParams.get("module") ?? "extension";
     const key = `${module}:${kind}`;
 

@@ -22,6 +22,7 @@ const PLANNING = `Plan mode is on. Read and explore, then propose a plan; change
 
 /** Tools that change nothing, or whose own calls are checked in plan mode (codemode's, and a subagent's in its own plan mode). */
 const ALWAYS_ALLOWED = new Set([
+    "machine_activity",
     "read",
     "artifact",
     "design_preview",

@@ -81,9 +81,14 @@ const stampOf = (info: { mtimeMs: number; size: number }) => `${info.mtimeMs}:${
  * HEIF photo is made JPEG first. The note says what differs from the file: the format, then the
  * size in the words of Pi's read tool.
  */
-function make(path: string, mimeType: string, first: boolean): Promise<ModelImage> {
+function make(
+    path: string,
+    mimeType: string,
+    first: boolean,
+    source?: Uint8Array,
+): Promise<ModelImage> {
     return inTurn(async () => {
-        let bytes: Uint8Array = await readFile(path);
+        let bytes: Uint8Array = source ?? (await readFile(path));
         let type = mimeType;
 
         if (HEIC_TYPES.has(mimeType)) {
@@ -141,7 +146,16 @@ export function prepareModelImage(path: string, mimeType: string, size: number):
 }
 
 /** An attached image as the model gets it: the one prepared at upload while its file is unchanged, or made now. */
-export async function modelImage(path: string, mimeType: string): Promise<ModelImage> {
+export async function modelImage(
+    path: string,
+    mimeType: string,
+    bytes?: Uint8Array,
+): Promise<ModelImage> {
+    // A worker already authorized and read these bytes. Never stat a remote path on the server.
+    if (bytes !== undefined) {
+        return make(path, mimeType, true, bytes);
+    }
+
     const entry = prepared.get(path);
 
     if (entry !== undefined) {

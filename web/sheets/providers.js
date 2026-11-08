@@ -1,7 +1,15 @@
 // Model providers: signing in and out, the models subagents may use, and the dialog a
 // sign-in uses to ask for a code or a key.
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { api, attempt, closeSheet, closeSignIn, signInAnswered, store } from "../store.js";
+import {
+    api,
+    attempt,
+    closeSheet,
+    closeSignIn,
+    openSheet,
+    signInAnswered,
+    store,
+} from "../store.js";
 import { html, Icon, Loader, MODEL_SEARCH_AT, Sheet } from "../ui.js";
 import { RefreshModelsButton, RefreshModelsStatus } from "../model-refresh.js";
 import { favoriteModels, setModelFavorite } from "../model-favorites.js";
@@ -525,6 +533,7 @@ export function ProvidersSheet() {
         onClose=${closeSheet}
         className=${`providers-sheet ${owner ? "with-side" : ""}`}
     >
+        ${owner && html`<button class="button small" onClick=${() => openSheet({ type: "subscription-usage" })}>Subscription usage</button>`}
         <div class="providers-layout">
             ${
                 owner &&

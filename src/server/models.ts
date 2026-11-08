@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime, ScopedModel } from "@earendil-works/pi-coding-agent";
 import type { AgentState, ModelRef } from "@earendil-works/pi-durable";
+import { supportsFast } from "./fast-mode.ts";
 
 // A record, so a level Pi adds fails the type check until it is here too.
 const LEVELS: Record<ModelThinkingLevel, true> = {
@@ -95,6 +96,34 @@ export function modelList(
     }));
 }
 
+/** Compare model-name tokens independent of their order, retaining version numbers. */
+function modelDistance(left: string, right: string): number {
+    const tokens = (value: string) =>
+        (value.toLowerCase().match(/[a-z]+|\d+(?:\.\d+)*/g) ?? []).sort().join("-");
+    const a = tokens(left);
+    const b = tokens(right);
+    const row = Array.from({ length: b.length + 1 }, (_, index) => index);
+
+    for (let i = 1; i <= a.length; i++) {
+        let diagonal = row[0]!;
+
+        row[0] = i;
+
+        for (let j = 1; j <= b.length; j++) {
+            const previous = row[j]!;
+
+            row[j] = Math.min(
+                row[j]! + 1,
+                row[j - 1]! + 1,
+                diagonal + Number(a[i - 1] !== b[j - 1]),
+            );
+            diagonal = previous;
+        }
+    }
+
+    return row[b.length]!;
+}
+
 /** A signed-in model by `provider/id`, or by id alone; undefined when there is none. */
 export function findModel(models: ModelRuntime, spec: string): Model<Api> | undefined {
     const trimmed = spec.trim();
@@ -152,7 +181,28 @@ export function resolveModel(
     const found = findModel(models, spec);
 
     if (found === undefined) {
-        throw new Error(`Model ${spec} is not available here.`);
+        const trimmed = spec.trim();
+        const slash = trimmed.indexOf("/");
+        const provider = slash > 0 ? trimmed.slice(0, slash) : undefined;
+        const id = slash > 0 ? trimmed.slice(slash + 1) : trimmed;
+        const available = models.getAvailableSnapshot();
+        const suggestions = available
+            .filter((model) => provider === undefined || model.provider === provider)
+            .map((model) => ({ model, distance: modelDistance(id, model.id) }))
+            .filter(({ distance }) => distance <= Math.max(1, Math.floor(id.length / 4)))
+            .sort((a, b) => a.distance - b.distance)
+            .slice(0, 3)
+            .map(({ model }) => `${model.provider}/${model.id}`);
+        // Show the requested account first, but include the complete catalog: a global cap hid custom providers.
+        const names = [...available]
+            .sort((a, b) => Number(b.provider === provider) - Number(a.provider === provider))
+            .map((model) => `${model.provider}/${model.id}`);
+
+        throw new Error(
+            `Model ${spec} is not available here.` +
+                (suggestions.length === 0 ? "" : ` Did you mean: ${suggestions.join(", ")}?`) +
+                `\nAvailable models (${names.length}):\n${names.length === 0 ? "None. Add or sign in to a provider." : names.join("\n")}`,
+        );
     }
 
     if (signInNeeded(found.provider)) {
@@ -181,6 +231,7 @@ export function agentInfo(
         thinkingLevel: agent.thinkingLevel ?? "off",
         cwd: agent.cwd ?? defaultCwd,
         ...(agent.instructions === undefined ? {} : { instructions: agent.instructions }),
+        fastCapable: supportsFast(model),
         available:
             model !== undefined &&
             models.hasConfiguredAuth(model.provider) &&

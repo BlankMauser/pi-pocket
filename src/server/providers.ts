@@ -11,12 +11,16 @@
  * fails on it marks it.
  */
 import { randomUUID } from "node:crypto";
+import { type FSWatcher, readFileSync, watch } from "node:fs";
+import { join } from "node:path";
 import type { AuthPrompt } from "@earendil-works/pi-ai";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
 import { describe, HttpError } from "./errors.ts";
 import { ModelRefresh } from "./model-refresh.ts";
+import { SubscriptionUsage } from "./subscription-usage.ts";
 
 /** How long asking a provider's sign-in afresh may take: a renewal's own limit is 15 seconds. */
 const CHECK_MS = 20_000;
@@ -75,7 +79,14 @@ interface AuthFlow {
 
 export class Providers {
     readonly #app: PocketApp;
+    readonly #usage: SubscriptionUsage;
     readonly #flows = new Map<string, AuthFlow>();
+    #watcher: FSWatcher | undefined;
+    /** The one timer that waits out a burst of saves; `refresh()` re-arms it without making another. */
+    #settle: NodeJS.Timeout | undefined;
+    #reloading = false;
+    #again = false;
+
     readonly modelRefresh: ModelRefresh;
     /** Providers whose sign-in could not be renewed, and what they said. In memory: asked again after a restart. */
     readonly #expired = new Map<string, string>();
@@ -89,7 +100,98 @@ export class Providers {
 
     constructor(app: PocketApp) {
         this.#app = app;
+        this.#usage = new SubscriptionUsage(() => this.#app.models);
         this.modelRefresh = new ModelRefresh(app);
+    }
+
+    /**
+     * Pick up edits to Pi's `models.json` and `auth.json` without a restart. The operating system tells us when the
+     * folder changes (inotify and its kin), so nothing runs, polls, or allocates while the files are quiet. A burst
+     * of saves, as an editor makes, is one reload a moment after the last. Nothing is fetched: it re-reads the files.
+     */
+    watchConfig(): void {
+        const directory = getAgentDir();
+
+        try {
+            // The folder, not the files: editors replace a file by renaming another over it, which ends a file watch.
+            this.#watcher = watch(directory, { persistent: false }, (_event, name) => {
+                if (name === "models.json" || name === "auth.json") {
+                    this.#schedule();
+                }
+            });
+            this.#watcher.on("error", (error) => {
+                this.#app.log(`Model files are no longer watched: ${describe(error)}`);
+                this.#watcher?.close();
+                this.#watcher = undefined;
+            });
+        } catch (error) {
+            this.#app.log(
+                `Model files are not watched (restart to pick up changes): ${describe(error)}`,
+            );
+        }
+    }
+
+    #schedule(): void {
+        if (this.#settle === undefined) {
+            this.#settle = setTimeout(this.#reload, 400);
+        } else {
+            this.#settle.refresh();
+        }
+    }
+
+    #reload = (): void => {
+        this.#settle = undefined;
+
+        if (this.#reloading) {
+            this.#again = true;
+
+            return;
+        }
+
+        this.#reloading = true;
+        void this.#refresh().finally(() => {
+            this.#reloading = false;
+
+            if (this.#again) {
+                this.#again = false;
+                this.#schedule();
+            }
+        });
+    };
+
+    async #refresh(): Promise<void> {
+        try {
+            // A half-written models.json would read as "no models" and empty the picker: wait for the next save.
+            JSON.parse(readFileSync(join(getAgentDir(), "models.json"), "utf8"));
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                this.#app.log(
+                    `models.json not reloaded, it does not parse yet: ${describe(error)}`,
+                );
+
+                return;
+            }
+        }
+
+        try {
+            this.#usage.clear();
+            await this.#app.models.refresh({ allowNetwork: false });
+            await this.#app.models.getAvailable().catch(() => []);
+
+            const problem = this.#app.models.getError();
+
+            if (problem !== undefined) {
+                this.#app.notice("warning", `models.json: ${problem}`);
+            }
+
+            this.#changed();
+        } catch (error) {
+            this.#app.log(`Model reload failed: ${describe(error)}`);
+        }
+    }
+
+    subscriptionUsage() {
+        return this.#usage.summary();
     }
 
     /** How many sign-ins and sign-outs here a provider has had: a limit that one account hit is not the next one's. */
@@ -439,13 +541,16 @@ export class Providers {
             getDeviceId: () => this.#app.settings.getOrCreateDeviceId(),
         });
         await this.#app.models.getAvailable().catch(() => []);
+        this.#usage.clear();
         this.#signedInOrOut(providerId);
         this.#changed();
     }
 
     async logout(providerId: string): Promise<void> {
         await this.#app.models.logout(providerId);
+        this.#usage.clear();
         await this.#app.models.getAvailable().catch(() => []);
+        this.#usage.clear();
         this.#signedInOrOut(providerId);
         this.#changed();
     }
@@ -465,6 +570,8 @@ export class Providers {
     }
 
     close(): void {
+        clearTimeout(this.#settle);
+        this.#watcher?.close();
         this.modelRefresh.close();
 
         for (const flow of this.#flows.values()) {

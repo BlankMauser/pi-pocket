@@ -28,6 +28,11 @@ const DESIGN_NOTE = `Before you make or change a design, read ${DESIGN_GUIDE}. C
  * the codemode route, where it never shows; `guide`: the module that provides it (`web.provide({ guide })`) instead.
  */
 const DEFERRED: Record<string, { use: string; section?: string; note?: string; guide?: string }> = {
+    machine_activity: {
+        use: "identify conversations using a worker or holding build/GPU locks",
+        section: "machine_activity",
+        note: "Read-only process and cooperative lock ownership. Inspect before competing work; never kill another chat's process or delete its lock without permission.",
+    },
     browser: {
         use: "open and test web pages in a real browser",
         section: "browser",

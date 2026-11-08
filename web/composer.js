@@ -39,7 +39,7 @@ import { TrustBar } from "./trust.js";
 import { prefs } from "./theme.js";
 import { fingerprint } from "./text-hash.js";
 import { says } from "./turns.js";
-import { MicButton, useDictation } from "./voice.js";
+import { learnFromSend, useDictation } from "./dictation.js";
 import {
     APPLE,
     contextLevel,
@@ -612,11 +612,6 @@ export function Composer() {
             }
         };
     });
-    // Dictation writes into the box as typing does, so the draft keeps what was heard.
-    const dictation = useDictation(box, (value, at) => {
-        setBrowsing(null);
-        edit(value, at);
-    });
     // What is above the message box, and how it shares the room with the conversation (`dock.js`).
     const dock = useRef(null);
     const picker = useRef(null);
@@ -718,12 +713,12 @@ export function Composer() {
     useEffect(() => {
         const draft = drafts.get(conversationId);
 
-        dictation.stop(true);
         setText(draft);
         setCaret(draft.length);
         setPastes(loadPastes(conversationId));
         setBrowsing(null);
         setSearching(false);
+        dictation.cancel();
     }, [conversationId]);
     // A session opens with the caret in its message box, ready to type: not on a touch screen, where the keyboard would
     // come up over the conversation, nor after an Alt shortcut on an Apple keyboard (`openingByAlt`), nor while another
@@ -824,6 +819,29 @@ export function Composer() {
 
         update(value, at);
     };
+
+    // Voice dictation: the words land where the caret was, and typing, sending or leaving the session ends it.
+    const dictation = useDictation({
+        read: () => {
+            const element = box.current;
+
+            return {
+                scope: conversationId,
+                text: drafts.get(conversationId),
+                from: element?.selectionStart ?? 0,
+                to: element?.selectionEnd ?? 0,
+            };
+        },
+        write: (value, at) => {
+            setBrowsing(null);
+            edit(value, at);
+            requestAnimationFrame(() => {
+                if (box.current?.value === value) {
+                    box.current.setSelectionRange(at, at);
+                }
+            });
+        },
+    });
 
     // Ctrl+R: what was sent before that has the words in the box.
     const recalled = searching ? searchHistory(text, historyScope) : [];
@@ -1006,7 +1024,8 @@ export function Composer() {
         }
 
         // What shows is what goes: words still coming would land in the emptied box.
-        dictation.stop(true);
+        learnFromSend(conversationId, text);
+        dictation.cancel();
         const full = expandPastes(text, pastes);
 
         if (parsed) {
@@ -1396,9 +1415,38 @@ export function Composer() {
 
     useEffect(() => {
         if (!writes) {
-            dictation.stop(true);
+            dictation.cancel();
         }
     }, [writes]);
+    // Alt+V dictates into this box, when PiP's has not taken it (the app's shortcut leaves the event alone then).
+    useEffect(() => {
+        const shortcut = (event) => {
+            if (
+                event.code !== "KeyV" ||
+                !event.altKey ||
+                event.ctrlKey ||
+                event.metaKey ||
+                event.defaultPrevented ||
+                store.state.sheet ||
+                store.state.launcher ||
+                !writes ||
+                sending ||
+                !dictation.available ||
+                dictation.finishing ||
+                dictation.polishing ||
+                !box.current?.isConnected
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+            dictation.toggle();
+        };
+
+        addEventListener("keydown", shortcut);
+
+        return () => removeEventListener("keydown", shortcut);
+    });
 
     if (collab() && !canSteer()) {
         return html`<footer class="composer-wrap" data-part="composer">
@@ -1780,6 +1828,7 @@ export function Composer() {
                         readonly=${sending}
                         placeholder=${placeholder}
                         onInput=${(event) => {
+                            dictation.cancel();
                             setBrowsing(null);
                             edit(event.currentTarget.value, event.currentTarget.selectionStart);
                         }}
@@ -1790,6 +1839,18 @@ export function Composer() {
                         onPaste=${onPaste}
                         enterkeyhint=${coarse ? "enter" : "send"}
                     ></textarea>
+                    ${
+                        (dictation.available || store.state.me?.role === "owner") &&
+                        html`<div class="voice-bar">
+                            <span role="status" aria-live="polite">
+                                ${dictation.polishing ? "GPT-6 Luna · medium · cleaning…" : dictation.finishing ? "Finishing dictation…" : dictation.listening ? "Listening…" : ""}
+                            </span>
+                            ${dictation.polishing && html`<button class="link small" onClick=${dictation.cancel}>Keep raw</button>`}
+                            ${dictation.hasUndo && html`<button class="link small" onClick=${dictation.undo}>Undo cleanup</button>`}
+                            <span class="grow"></span>
+                            ${store.state.me?.role === "owner" && html`<button class="link small" onClick=${() => openSheet({ type: "voice" })}>Voice settings · Vocabulary</button>`}
+                        </div>`
+                    }
                     <div class="composer-row" data-part="composer-tools">
                         ${slotItems("composer", { picker, agent, level, view }).map(({ node }) => node)}
                         <input
@@ -1845,12 +1906,22 @@ export function Composer() {
                                 )}
                             </div>`
                         }
-                        <${MicButton}
-                            dictation=${dictation}
-                            class="composer-mic"
-                            part="composer-button"
-                            disabled=${sending}
-                        />
+                        ${
+                            dictation.available &&
+                            html`<button
+                                type="button"
+                                class=${`icon-button mic-button dictate composer-mic ${dictation.listening ? "on listening" : ""}`}
+                                data-part="composer-button"
+                                aria-label=${dictation.listening ? "Stop dictating" : "Dictate"}
+                                aria-pressed=${dictation.listening ? "true" : "false"}
+                                disabled=${sending || dictation.finishing || dictation.polishing}
+                                title=${dictation.listening ? "Listening: tap to stop (Alt+V)" : "Dictate with your voice (Alt+V)"}
+                                onMouseDown=${(event) => event.preventDefault()}
+                                onClick=${dictation.toggle}
+                            >
+                                <${Icon} name="mic" size=${17} />
+                            </button>`
+                        }
                         <button
                             class=${`send-button ${canSend ? "ready" : ""}`}
                             data-part="send-button"
@@ -1914,6 +1985,11 @@ defineItem("composer", {
             <${Icon} name="sparkle" size=${12} class="model-spark" />
             <span class="model-name">${shortModel(agent)}</span>
             ${level && html`<span class="model-level">${level}</span>`}
+            ${
+                agent?.fastCapable &&
+                store.state.server?.openaiFast &&
+                html`<span class="fast-mark" title="OpenAI Fast mode is on">⚡</span>`
+            }
             <${Icon} name="chevron" size=${12} stroke=${2.2} class="model-caret" />
         </button>`,
 });

@@ -80,6 +80,7 @@ import {
 } from "./resend.ts";
 import { whyUnanswered } from "./subagent-runs.ts";
 import { wantsTitle, writeTitle } from "./titles.ts";
+import { machineFolder, machinePath } from "./workers.ts";
 import { describeMoment, describeRepeat, knownZone } from "./when.ts";
 import {
     createWorktree,
@@ -425,7 +426,8 @@ export class Commands {
         const requested = optionalText(request.cwd, "cwd") ?? app.defaultCwd;
 
         app.requireWorkspaceOwner(user, requested);
-        const remote = app.workspaceScheme(requested) !== undefined;
+        const remote =
+            app.workspaceScheme(requested) !== undefined && machinePath(requested) === undefined;
 
         if (remote && request.worktree === true) {
             throw new HttpError(400, "Remote workspaces do not support worktrees.");
@@ -549,12 +551,38 @@ export class Commands {
             return create({ cwd, skipped: [] });
         }
 
-        const made = await createWorktree(cwd, join(this.#app.dataDir, "worktrees"), label);
+        const remote = machinePath(cwd);
+        const original =
+            remote === undefined
+                ? await createWorktree(cwd, join(this.#app.dataDir, "worktrees"), label)
+                : await this.#app.workers.rpc<Place & { worktree: Worktree }>(
+                      cwd,
+                      "workspace.createWorktree",
+                      { label },
+                  );
+        const made =
+            remote === undefined
+                ? original
+                : {
+                      ...original,
+                      cwd: machineFolder(remote.machineId, original.cwd),
+                      worktree: {
+                          ...original.worktree,
+                          path: machineFolder(remote.machineId, original.worktree.path),
+                          source: cwd,
+                      },
+                  };
 
         try {
             return await create(made);
         } catch (error) {
-            await discardWorktree(made.worktree).catch((cleanup: unknown) =>
+            await (
+                remote === undefined
+                    ? discardWorktree(made.worktree)
+                    : this.#app.workers.rpc(cwd, "workspace.discardWorktree", {
+                          worktree: original.worktree,
+                      })
+            ).catch((cleanup: unknown) =>
                 this.#app.log(`worktree ${made.worktree.path} left behind: ${describe(cleanup)}`),
             );
 
@@ -570,7 +598,10 @@ export class Commands {
         await app.requireDriver(id, user);
         const worktree = app.sessionMeta(id)?.worktree;
 
-        if (app.workspaceScheme(app.cwdOf(id)) !== undefined) {
+        if (
+            app.workspaceScheme(app.cwdOf(id)) !== undefined &&
+            machinePath(app.cwdOf(id)) === undefined
+        ) {
             throw new HttpError(400, "Remote workspaces do not support worktrees.");
         }
 
@@ -578,7 +609,11 @@ export class Commands {
             throw new HttpError(404, "This session has no worktree");
         }
 
-        const inside = (cwd: string) => inWorktree(worktree, cwd);
+        const remote = machinePath(worktree.path);
+        const inside = (cwd: string) =>
+            remote === undefined
+                ? inWorktree(worktree, cwd)
+                : cwd === worktree.path || cwd.startsWith(`${worktree.path}/`);
 
         // Anything at work there would lose its folder: this session's runs, its subagents', or another session's.
         if (app.busyConversations().some((busy) => inside(app.cwdOf(busy)))) {
@@ -601,13 +636,41 @@ export class Commands {
             );
         }
 
-        const back = await sourceFolders(worktree);
+        const actualWorktree =
+            remote === undefined
+                ? worktree
+                : {
+                      ...worktree,
+                      path: remote.path,
+                      source: machinePath(worktree.source)!.path,
+                  };
+        const back = remote === undefined ? await sourceFolders(worktree) : undefined;
         const moves = app
             .conversationsOf(id)
             .filter((each) => inside(app.cwdOf(each)))
-            .map((each) => ({ id: each, cwd: back(app.cwdOf(each)) }));
+            .map((each) => ({ id: each, cwd: app.cwdOf(each) }));
 
-        await removeWorktree(worktree, force === true);
+        for (const move of moves) {
+            move.cwd =
+                remote === undefined
+                    ? back!(move.cwd)
+                    : machineFolder(
+                          remote.machineId,
+                          await app.workers.rpc<string>(worktree.source, "workspace.sourceFolder", {
+                              worktree: actualWorktree,
+                              path: machinePath(move.cwd)!.path,
+                          }),
+                      );
+        }
+
+        if (remote === undefined) {
+            await removeWorktree(worktree, force === true);
+        } else {
+            await app.workers.rpc(worktree.source, "workspace.removeWorktree", {
+                worktree: actualWorktree,
+                force: force === true,
+            });
+        }
 
         // The session and its subagents go back to the folders the worktree came from.
         for (const move of moves) {
@@ -798,6 +861,11 @@ export class Commands {
 
         const conversation = await app.conversation(id);
         const typed = request.text.trim();
+
+        if (machinePath(app.cwdOf(id)) !== undefined) {
+            await app.workers.resources(app.cwdOf(id));
+        }
+
         // `/skill:name request` sends the skill with the request; `/name arguments`, Pi's prompt template of that name.
         const expanded = typed.startsWith("/skill:")
             ? (expandSkillCommand(typed, app.skillCommands(id)) ?? typed)
@@ -830,7 +898,15 @@ export class Commands {
             ? attachments.filter((file) => forModel(file.mime, file.size))
             : [];
         const made = await Promise.allSettled(
-            images.map((file) => modelImage(file.path, file.mime)),
+            images.map(async (file) =>
+                modelImage(
+                    file.path,
+                    file.mime,
+                    machinePath(app.cwdOf(id)) === undefined
+                        ? undefined
+                        : await app.workspace.readBytes(user, id, file.path),
+                ),
+            ),
         );
         // What differs between a file and the image the model gets goes on the file's line.
         const notes = new Map<Attachment, string>();
@@ -1160,6 +1236,51 @@ export class Commands {
         const app = this.#app;
         const parts: (TextContent | ImageContent)[] = [];
         let total = 0;
+
+        if (machinePath(app.cwdOf(id)) !== undefined) {
+            for (const mention of mentionedPaths(text).slice(0, MAX_MENTIONED)) {
+                for (const candidate of mention.candidates) {
+                    try {
+                        const view = await app.workspace.viewFile(id, user, candidate);
+                        const mime = IMAGE_MIME[extname(view.path).toLowerCase()];
+
+                        if (
+                            view.kind === "image" &&
+                            images &&
+                            mime !== undefined &&
+                            view.size <= MAX_INLINE_IMAGE
+                        ) {
+                            parts.push(
+                                (
+                                    await modelImage(
+                                        view.path,
+                                        mime,
+                                        await app.workspace.readBytes(user, id, view.path),
+                                    )
+                                ).image,
+                            );
+                        } else if (view.kind === "text" && total < MAX_MENTIONED_TOTAL) {
+                            const content = view.text.slice(
+                                0,
+                                Math.min(MAX_MENTIONED_FILE, MAX_MENTIONED_TOTAL - total),
+                            );
+
+                            total += content.length;
+                            parts.push({
+                                type: "text",
+                                text: `<file path="${view.path}">\n${content}\n</file>`,
+                            });
+                        }
+
+                        break;
+                    } catch {
+                        /* An inaccessible mention stays a mention. */
+                    }
+                }
+            }
+
+            return parts;
+        }
 
         for (const mention of mentionedPaths(text).slice(0, MAX_MENTIONED)) {
             let file: string | undefined;

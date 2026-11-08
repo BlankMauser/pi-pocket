@@ -179,6 +179,22 @@ export class Spend {
         this.#stopOverLimit();
     }
 
+    /** Fork-compatible entry for side requests (dictation) that hold a `provider/model` key and bare usage. */
+    async recordSupplementalUsage(
+        id: ConversationId,
+        payer: string,
+        model: string,
+        usage: Usage,
+    ): Promise<void> {
+        const slash = model.indexOf("/");
+
+        await this.recordModelUsage(id, payer, {
+            provider: slash < 0 ? "" : model.slice(0, slash),
+            model: slash < 0 ? model : model.slice(slash + 1),
+            usage,
+        } as AssistantMessage);
+    }
+
     /** Who pays for a conversation's work: whoever asked for it, else whoever started the session, else the owner. */
     payer(id: ConversationId): string {
         const app = this.#app;

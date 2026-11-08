@@ -29,6 +29,7 @@ import { basename, dirname, join, normalize } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Extension, Registry } from "@earendil-works/pi-durable";
 import { describe } from "./errors.ts";
+import { embeddedExtension } from "../../.bolt/embedded.ts";
 import { documentImports } from "./extension-document-imports.ts";
 import { ExtensionWebs, OLDEST_POCKET_API, POCKET_API } from "./extension-web.ts";
 import type { ExtensionModule, PocketHost, WebAccess } from "./host.ts";
@@ -56,6 +57,7 @@ const ORDER = [
     "anthropic-subscription.ts",
     "guard.ts",
     "codemode.ts",
+    "machine-activity.ts",
     "memory.ts",
     "pip.ts",
     "triggers.ts",
@@ -96,6 +98,7 @@ const TITLES: Record<string, string> = {
     "anthropic-subscription.ts": "Claude subscription billing",
     "guard.ts": "Lancet Guard",
     "codemode.ts": "Codemode",
+    "machine-activity.ts": "Machine activity",
     "memory.ts": "Memory",
     "pip.ts": "PiP",
     "triggers.ts": "Triggers",
@@ -130,6 +133,7 @@ export const BUILT_IN_TOOLS: ReadonlySet<string> = new Set([
     "schedule",
     "background",
     "codemode",
+    "machine_activity",
     "tool_search",
     "memory",
     "sessions",
@@ -658,7 +662,12 @@ export class ExtensionLoader {
             pathToFileURL(join(module.directory, file)).href +
             // Each load its own address, or a second load in the same millisecond would get the first one's module.
             (cacheBust ? `?v=${Date.now()}-${++imports}` : "");
-        const loaded = (await this.#within(import(url), deadline, file)) as ExtensionModule;
+        const embedded =
+            module.source === "built-in"
+                ? embeddedExtension(file, join(module.directory, file))
+                : undefined;
+        const loaded = (embedded ??
+            (await this.#within(import(url), deadline, file))) as ExtensionModule;
 
         // The import can take a while (a module may wait at its top level): the module may be off by now, or edited.
         this.#stillLatest(file, generation);

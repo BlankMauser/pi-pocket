@@ -157,3 +157,24 @@ test("HEIC photos convert one at a time, as the decoder's memory is outside the 
     clearInterval(timer);
     assert.equal(most, 1);
 });
+
+test("worker image bytes never read the server path or reuse its prepared image", async () => {
+    const remote = await modelImage("Z:/only-on-worker/remote.png", "image/png", BLUE);
+
+    assert.equal(remote.image.data, BLUE.toString("base64"));
+    const folder = mkdtempSync(join(tmpdir(), "worker-model-images-"));
+
+    try {
+        const path = join(folder, "same-name.png");
+
+        writeFileSync(path, PNG);
+        prepareModelImage(path, "image/png", PNG.length);
+        const local = await modelImage(path, "image/png");
+        const worker = await modelImage(path, "image/png", BLUE);
+
+        assert.equal(worker.image.data, BLUE.toString("base64"));
+        assert.equal(await modelImage(path, "image/png"), local);
+    } finally {
+        rmSync(folder, { recursive: true, force: true });
+    }
+});

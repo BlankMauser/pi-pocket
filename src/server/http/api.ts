@@ -22,6 +22,7 @@ import {
 import type { User } from "../config.ts";
 import { MAX_AVATAR, readAvatar } from "../avatars.ts";
 import { HttpError } from "../errors.ts";
+import { machineFolder, machinePath } from "../workers.ts";
 import { desktopTheme, wallpaperFile } from "../omarchy.ts";
 import { runningBoard, runningNow } from "../running.ts";
 import { serveImage } from "./assets.ts";
@@ -38,6 +39,7 @@ import {
     readBody,
     readJson,
 } from "./io.ts";
+import { Dictation } from "../dictation.ts";
 import { pushRoutes } from "./push-routes.ts";
 
 /** This machine's non-internal IPv4 addresses, for invite links other devices on its networks can open. */
@@ -52,6 +54,7 @@ function lanAddresses(): string[] {
 export function createApi(options: HttpOptions, auth: Auth) {
     const { app } = options;
     const { events, poll } = createEventStreams(app);
+    const dictation = new Dictation(app);
 
     const requireUser = (request: IncomingMessage): User => {
         const user = auth.user(request);
@@ -155,6 +158,90 @@ export function createApi(options: HttpOptions, auth: Auth) {
 
         if (first === "poll" && method === "GET") {
             return poll(request, response, url, user);
+        }
+
+        if (first === "dictation" && second === "vocabulary" && third === undefined) {
+            requireOwner(user);
+
+            if (method === "GET") {
+                return json(response, 200, await dictation.vocabulary(user));
+            }
+
+            if (method === "POST") {
+                const body = await readJson<{ text?: unknown; revision?: unknown }>(request);
+
+                if (body === null || typeof body !== "object" || Array.isArray(body)) {
+                    throw new HttpError(400, "Expected a vocabulary object");
+                }
+
+                return json(
+                    response,
+                    200,
+                    await dictation.saveVocabulary(user, body.text, body.revision),
+                );
+            }
+        }
+
+        if (first === "dictation" && second === "learned" && third === undefined) {
+            requireOwner(user);
+
+            if (method === "GET") {
+                return json(response, 200, await dictation.learned(user));
+            }
+        }
+
+        if (first === "dictation" && second === "learn" && method === "POST") {
+            requireOwner(user);
+            const body = await readJson<{ corrections?: unknown; terms?: unknown }>(request);
+
+            if (body === null || typeof body !== "object" || Array.isArray(body)) {
+                throw new HttpError(400, "Expected a learning object");
+            }
+
+            return json(response, 200, await dictation.learn(user, body));
+        }
+
+        if (first === "dictation" && second === "forget" && method === "POST") {
+            requireOwner(user);
+            const body = await readJson<{ kind?: unknown; key?: unknown }>(request);
+
+            if (body === null || typeof body !== "object" || Array.isArray(body)) {
+                throw new HttpError(400, "Expected a forget object");
+            }
+
+            return json(response, 200, await dictation.forget(user, body));
+        }
+
+        if (first === "dictation" && second === "cleanup" && method === "POST") {
+            requireOwner(user);
+            const body = await readJson<{
+                conversationId?: unknown;
+                text?: unknown;
+                requestId?: unknown;
+                fast?: unknown;
+            }>(request);
+
+            if (body === null || typeof body !== "object" || Array.isArray(body)) {
+                throw new HttpError(400, "Expected a dictation object");
+            }
+
+            const controller = new AbortController();
+            const disconnected = () => controller.abort();
+
+            response.once("close", disconnected);
+
+            try {
+                const result = await dictation.cleanup(
+                    user,
+                    conversationId(String(body.conversationId)),
+                    body,
+                    controller.signal,
+                );
+
+                return json(response, 200, result);
+            } finally {
+                response.off("close", disconnected);
+            }
         }
 
         if (first === "me" && method === "GET") {
@@ -635,6 +722,16 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return json(response, 200, { ok: true });
         }
 
+        if (first === "workers" && second === undefined && method === "GET") {
+            app.requireSteer(user);
+
+            if (user.sessions !== undefined) {
+                throw new HttpError(403, "You were invited to one session.");
+            }
+
+            return json(response, 200, { workers: await app.workers.list() });
+        }
+
         if (first === "fs" && method === "GET") {
             app.requireSteer(user);
 
@@ -643,6 +740,33 @@ export function createApi(options: HttpOptions, auth: Auth) {
             }
 
             const requested = url.searchParams.get("path") || "~";
+            const remote = machinePath(requested);
+
+            if (remote !== undefined) {
+                const result = await app.workers.rpc<{
+                    path: string;
+                    parent: string | null;
+                    home: string;
+                    dirs: { name: string; path: string }[];
+                }>(requested, "fs.list", { hidden: url.searchParams.get("hidden") === "1" });
+                const wrap = (path: string) => machineFolder(remote.machineId, path);
+
+                return json(response, 200, {
+                    ...result,
+                    path: wrap(result.path),
+                    parent: result.parent === null ? null : wrap(result.parent),
+                    home: wrap(result.home),
+                    dirs: result.dirs.map((dir) => ({ ...dir, path: wrap(dir.path) })),
+                    recent: [...new Set(app.sessions(user).map((session) => session.cwd))]
+                        .filter((cwd) => machinePath(cwd)?.machineId === remote.machineId)
+                        .slice(0, 8),
+                });
+            }
+
+            if (process.env.PI_POCKET_WORKERS_ONLY === "1") {
+                throw new HttpError(400, "Choose an execution machine first.");
+            }
+
             const path = app.workspace.checkDirectory(requested);
             const showHidden = url.searchParams.get("hidden") === "1";
             const dirs: { name: string; path: string }[] = [];
@@ -705,12 +829,15 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 throw new HttpError(400, "Name the folder to make.");
             }
 
-            return json(response, 200, { path: app.workspace.makeFolder(user, body.path) });
+            return json(response, 200, {
+                path: await app.workspace.makeWorkingFolder(user, body.path),
+            });
         }
 
         if (first === "settings" && method === "POST") {
             const body = await readJson<{
                 approvalRule?: unknown;
+                openaiFast?: unknown;
                 defaultModel?: unknown;
                 pipCompactAt?: unknown;
                 subagentModels?: unknown;
@@ -721,6 +848,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
             if (
                 [
                     body.approvalRule,
+                    body.openaiFast,
                     body.defaultModel,
                     body.pipCompactAt,
                     body.subagentModels,
@@ -746,6 +874,10 @@ export function createApi(options: HttpOptions, auth: Auth) {
 
             if (body.approvalRule !== undefined) {
                 await app.setApprovalRule(user, body.approvalRule);
+            }
+
+            if (body.openaiFast !== undefined) {
+                await app.setOpenAiFast(user, body.openaiFast);
             }
 
             // Null clears it: new sessions start with the last model picked again.
@@ -826,6 +958,12 @@ export function createApi(options: HttpOptions, auth: Auth) {
             await app.reloadExtension(second);
 
             return json(response, 200, await app.extensions(user));
+        }
+
+        if (first === "subscription-usage" && second === undefined && method === "GET") {
+            requireOwner(user);
+
+            return json(response, 200, await app.providers.subscriptionUsage());
         }
 
         if (

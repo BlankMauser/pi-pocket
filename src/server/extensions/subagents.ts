@@ -15,34 +15,39 @@
  * and Pi is told to stop and tell the user, never to try another model.
  */
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { arr, bool, obj, opt, str } from "@earendil-works/pi-schema";
 import type { Context } from "@earendil-works/chord";
-import {
-    AgentDoc,
-    AssistantEntry,
-    type ConversationId,
-    configure,
-    defineExtension,
-    defineTask,
-    defineTool,
-    type Extension,
-    InboxDoc,
-    LiveDoc,
-    type ModelRef,
-    section,
-    type SubmissionId,
-    type SubmissionRecord,
-    type TaskRuntime,
-    type Tx,
+import type {
+    ConversationId,
+    Extension,
+    ModelRef,
+    SubmissionId,
+    SubmissionRecord,
+    TaskRuntime,
+    Tx,
 } from "@earendil-works/pi-durable";
 import { type PendingReport, PlanDoc, REPORT_PREFIX, SubagentsDoc } from "../docs.ts";
 import { describe } from "../errors.ts";
+import { openAiFastStatus, openAiFastSummary } from "../fast-mode-status.ts";
 import type { ExtensionWeb, PocketHost } from "../host.ts";
 import { levelFor, sameModel, THINKING_LEVELS } from "../models.ts";
 import { modelLine } from "../model-facts.ts";
 import { requestFor } from "../requests.ts";
+import { aiSdk, durableSdk } from "../runtime-sdk.ts";
 import { whyUnanswered } from "../subagent-runs.ts";
+
+const { StringEnum } = aiSdk;
+const {
+    AgentDoc,
+    AssistantEntry,
+    configure,
+    defineExtension,
+    defineTask,
+    defineTool,
+    InboxDoc,
+    LiveDoc,
+    section,
+} = durableSdk;
 
 // Exclude Agent Teams by name even while it is off; enabling it later must not give nested agents delegation.
 const AgentTeams = defineExtension({ name: "pocket-agent-teams" });
@@ -858,26 +863,42 @@ export default function createSubagents(host: PocketHost, web?: ExtensionWeb) {
             "thinking, tools" +
             (choosing ? "" : "; it runs on your model") +
             "), send (name, message; followUp: true queues it after the current answer, else steers), stop (name), " +
-            "status (name, or all). Reports come back by themselves; do not poll.",
+            "status (name, or all). Reports come back by themselves; do not poll. OpenAI Fast is inherited from the server switch " +
+            "automatically; no speed argument is needed. Results report the requested tier.",
         parameters,
         // Not rerun after a crash: repeating stop could stop newer work. The model sees the interruption and can check
         // with status.
         replay: "unsafe",
         execute: async (args, api, context) => {
             const { action, name, message, followUp } = args;
-            const reply = (text: string, conversationId?: ConversationId) => ({
-                output: [{ type: "text" as const, text }],
-                ...(conversationId === undefined || name === undefined
-                    ? {}
-                    : {
-                          details: {
-                              action,
-                              name,
-                              conversationId,
-                              ...(message === undefined ? {} : { message }),
-                          },
-                      }),
-            });
+
+            const reply = (text: string, conversationId?: ConversationId) => {
+                const openaiFast = openAiFastStatus(host.dataDir);
+
+                return {
+                    output: [
+                        {
+                            type: "text" as const,
+                            text:
+                                conversationId === undefined
+                                    ? text
+                                    : `${text} ${openAiFastSummary(openaiFast)}`,
+                        },
+                    ],
+                    ...(conversationId === undefined || name === undefined
+                        ? {}
+                        : {
+                              details: {
+                                  action,
+                                  name,
+                                  conversationId,
+                                  openaiFast,
+                                  ...(message === undefined ? {} : { message }),
+                              },
+                          }),
+                };
+            };
+
             const registry = (await api.snapshot(SubagentsDoc, api.conversationId, context)) ?? {
                 agents: {},
                 reporters: {},
@@ -901,7 +922,9 @@ export default function createSubagents(host: PocketHost, web?: ExtensionWeb) {
                         (await api.snapshot(LiveDoc, found.conversationId, context))?.run !==
                         undefined;
 
-                    lines.push(`${each}: ${busy ? "working" : "idle"}`);
+                    lines.push(
+                        `${each}: ${busy ? "working" : "idle"}. ${openAiFastSummary(openAiFastStatus(host.dataDir))}`,
+                    );
                 }
 
                 return reply(lines.length === 0 ? "No subagents." : lines.join("\n"));

@@ -11,9 +11,11 @@
  * `_expandSkillCommand` in `dist/core/agent-session.js` writes them.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
-import { CONFIG_DIR_NAME, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { CONFIG_DIR_NAME, parseFrontmatter, type Skill } from "@earendil-works/pi-coding-agent";
 import { expandHome } from "./paths.ts";
+import { loadSessionSkills, type SkillSources } from "./skills.ts";
 
 export type PromptTemplate = {
     name: string;
@@ -224,6 +226,83 @@ export function expandPromptTemplate(
 
 /** A skill Pi has in a session's folder (`skills.ts` finds them), to run as `/skill:name`. */
 export type SkillCommand = { name: string; description: string; path: string; baseDir: string };
+
+/** A skill as a `/skill:name` command. */
+function skillCommand(skill: Skill): SkillCommand {
+    return {
+        name: skill.name,
+        description: skill.description,
+        path: skill.filePath,
+        baseDir: skill.baseDir,
+    };
+}
+
+/**
+ * The skills a session in `cwd` has on a worker machine, as `skills.ts` finds them here (the worker's `workspace.resources`
+ * calls this by name, outside this tree): the system prompt's skills text, formatted as for a session on this machine,
+ * and the `/skill:` commands, from one load. `paths` and `defaultProjectTrust` are from that machine's Pi settings; a
+ * project nobody decided about is not trusted there unless its `defaultProjectTrust` is "always".
+ */
+export function loadWorkerSkills(
+    cwd: string,
+    agentDir: string,
+    paths: readonly string[],
+    defaultProjectTrust: SkillSources["defaultProjectTrust"] = "ask",
+): { text: string; commands: SkillCommand[] } {
+    try {
+        const skills = loadSessionSkills(cwd, {
+            agentDir,
+            home: homedir(),
+            settingsPaths: paths,
+            defaultProjectTrust,
+        });
+
+        return { text: formatSkills(skills), commands: skills.map(skillCommand) };
+    } catch {
+        return { text: "", commands: [] };
+    }
+}
+
+/** Pi's own format (XML, a location per skill) costs about 150 characters more for each skill. */
+export function formatSkills(skills: readonly Skill[]): string {
+    const visible = skills.filter((skill) => !skill.disableModelInvocation);
+
+    if (visible.length === 0) {
+        return "";
+    }
+
+    // A description cannot close the block early.
+    const oneLine = (text: string) =>
+        text.replace(/\s+/g, " ").replaceAll("</skills", "&lt;/skills").trim();
+    const groups = new Map<string, string[]>();
+    const others: string[] = [];
+
+    for (const skill of visible) {
+        const folder = dirname(dirname(skill.filePath));
+        const usual =
+            basename(skill.filePath) === "SKILL.md" &&
+            basename(dirname(skill.filePath)) === skill.name;
+
+        if (usual) {
+            groups.set(folder, [
+                ...(groups.get(folder) ?? []),
+                `- ${skill.name}: ${oneLine(skill.description)}`,
+            ]);
+        } else {
+            others.push(`- ${skill.name} (${skill.filePath}): ${oneLine(skill.description)}`);
+        }
+    }
+
+    const blocks = [...groups].map(
+        ([folder, lines]) => `In ${join(folder, "<name>", "SKILL.md")}:\n${lines.join("\n")}`,
+    );
+
+    if (others.length > 0) {
+        blocks.push(`At their own paths:\n${others.join("\n")}`);
+    }
+
+    return `<skills>\nWhen a task matches a skill's description, read its SKILL.md with the read tool and follow it. Resolve a relative path in it against the skill's folder.\n\n${blocks.join("\n\n")}\n</skills>`;
+}
 
 /** `/skill:name request` with the skill's instructions, as Pi sends it; undefined when the text is not one. */
 export function expandSkillCommand(

@@ -6,12 +6,20 @@
  * Edit freely: saving this file reloads it into the running server.
  */
 import { statSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
-import { getDocsPath, loadProjectContextFiles, type Skill } from "@earendil-works/pi-coding-agent";
-import { defineExtension, type PromptInput, section } from "@earendil-works/pi-durable";
+import { join, resolve, sep } from "node:path";
+import type { PromptInput } from "@earendil-works/pi-durable";
 import { APP_ROOT } from "../config.ts";
 import type { PocketHost } from "../host.ts";
 import { workspaceScheme } from "../paths.ts";
+import { openAiFastPrompt } from "../fast-mode-status.ts";
+import { codingAgentSdk, durableSdk } from "../runtime-sdk.ts";
+import { machinePath } from "../workers.ts";
+import { formatSkills } from "../prompts.ts";
+
+export { formatSkills };
+
+const { getDocsPath, loadProjectContextFiles } = codingAgentSdk;
+const { defineExtension, section } = durableSdk;
 
 const PREAMBLE = `You are Pi, a coding agent in Pi Pocket, a durable, multiplayer web app. People talk to you from a browser, often a phone, and several can share one conversation. When more than one person uses this server, each message starts with [from: Name].
 
@@ -36,47 +44,6 @@ function docs(dataDir: string): string {
     return `Pi Pocket's docs, only for questions about Pi Pocket itself (how it works, your behavior in it, extending or changing it): start at the index ${join(folder, "index.md")}, follow only the links your task needs, and read a doc completely before changing anything.
 - Code: ${code}${code.split(sep).includes("node_modules") ? " (an npm install: read it, never edit it, since the next npm update replaces it; to change Pi Pocket, clone https://github.com/TannerMidd/pi-pocket and run that)" : ""}. Data: ${dataDir}; change it through the app, never by editing its files, except extensions/ (drop-ins) and themes/.
 - Pi's own docs (skills, prompt templates, models, providers, settings): ${getDocsPath()}`;
-}
-
-/** Pi's own format (XML, a location per skill) costs about 150 characters more for each skill. */
-export function formatSkills(skills: readonly Skill[]): string {
-    const visible = skills.filter((skill) => !skill.disableModelInvocation);
-
-    if (visible.length === 0) {
-        return "";
-    }
-
-    // A description cannot close the block early.
-    const oneLine = (text: string) =>
-        text.replace(/\s+/g, " ").replaceAll("</skills", "&lt;/skills").trim();
-    const groups = new Map<string, string[]>();
-    const others: string[] = [];
-
-    for (const skill of visible) {
-        const folder = dirname(dirname(skill.filePath));
-        const usual =
-            basename(skill.filePath) === "SKILL.md" &&
-            basename(dirname(skill.filePath)) === skill.name;
-
-        if (usual) {
-            groups.set(folder, [
-                ...(groups.get(folder) ?? []),
-                `- ${skill.name}: ${oneLine(skill.description)}`,
-            ]);
-        } else {
-            others.push(`- ${skill.name} (${skill.filePath}): ${oneLine(skill.description)}`);
-        }
-    }
-
-    const blocks = [...groups].map(
-        ([folder, lines]) => `In ${join(folder, "<name>", "SKILL.md")}:\n${lines.join("\n")}`,
-    );
-
-    if (others.length > 0) {
-        blocks.push(`At their own paths:\n${others.join("\n")}`);
-    }
-
-    return `<skills>\nWhen a task matches a skill's description, read its SKILL.md with the read tool and follow it. Resolve a relative path in it against the skill's folder.\n\n${blocks.join("\n\n")}\n</skills>`;
 }
 
 const STALE_MS = 30_000;
@@ -143,26 +110,57 @@ export default function createPrompt(host: PocketHost) {
 
     const cwdOf = (input: PromptInput) => input.env?.cwd ?? input.agent.cwd ?? process.cwd();
     // A workspace URI (`ssh://…`): this machine's AGENTS.md files and skills are not the remote's.
-    const local = (input: PromptInput) => workspaceScheme(input.agent.cwd ?? "") === undefined;
+
+    const remote = (input: PromptInput) => {
+        const cwd = input.agent.cwd ?? "";
+
+        return machinePath(cwd) === undefined ? undefined : cwd;
+    };
 
     return defineExtension({
         name: "pocket-prompt",
         sections: [
             section("preamble", () => PREAMBLE, { tag: false }),
             section("guidelines", () => GUIDELINES),
+            section("openai_fast", () => openAiFastPrompt(host.dataDir)),
             section("pocket_docs", () => docs(host.dataDir)),
-            section("project_context", (input) =>
-                local(input) ? load(cwdOf(input)).context : undefined,
-            ),
-            section("skills", (input) => (local(input) ? load(cwdOf(input)).skills : undefined), {
-                tag: false,
-            }),
-            section("environment", (input) => {
-                const base = `Working directory: ${cwdOf(input)}\nPlatform: ${process.platform}`;
+            section("project_context", async (input) => {
+                const cwd = remote(input);
 
-                // Off by default: a date in the system prompt changes once a day and rewrites the whole prompt cache.
-                // PI_POCKET_PROMPT_DATE=1 adds the local date back.
-                if (process.env.PI_POCKET_PROMPT_DATE !== "1") {
+                return cwd === undefined
+                    ? workspaceScheme(input.agent.cwd ?? "") === undefined
+                        ? load(cwdOf(input)).context
+                        : undefined
+                    : (await host.workers!.resources(cwd)).context;
+            }),
+            section(
+                "skills",
+                async (input) => {
+                    const cwd = remote(input);
+
+                    return cwd === undefined
+                        ? workspaceScheme(input.agent.cwd ?? "") === undefined
+                            ? load(cwdOf(input)).skills
+                            : undefined
+                        : (await host.workers!.resources(cwd)).skills;
+                },
+                { tag: false },
+            ),
+            section("environment", async (input) => {
+                const cwd = remote(input);
+                const platform =
+                    cwd === undefined
+                        ? process.platform
+                        : (await host.workers!.resources(cwd)).platform;
+                const machine =
+                    cwd === undefined
+                        ? ""
+                        : `\nExecution machine: ${machinePath(cwd)!.machineId}. Files and commands run there; do not use mm:// identifiers in tool paths.`;
+                const base = `Working directory: ${cwdOf(input)}${machine}\nPlatform: ${platform}`;
+
+                // On by default in this build (upstream leaves it off, as a date rewrites the prompt cache once a day).
+                // PI_POCKET_PROMPT_DATE=0 leaves the local date out.
+                if (process.env.PI_POCKET_PROMPT_DATE === "0") {
                     return base;
                 }
 
