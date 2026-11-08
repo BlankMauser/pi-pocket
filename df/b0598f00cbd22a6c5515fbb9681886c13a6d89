@@ -1,0 +1,165 @@
+docs/extensions/reference/names.md
+  s_3472be1b2cf028::t_a03e6fb63ed969 11,20
+package-lock.json
+  s_3472be1b2cf028::t_bc19be695049e9 17,589-601
+package.json
+  s_3472be1b2cf028::t_4d87d61d8703d9 62
+src/launcher/main.ts
+  s_3472be1b2cf028::t_6e3a3d8fcb55ba 62-63,595-597
+src/server/account-oauth-check.ts
+  s_3472be1b2cf028::t_3a0e30153ead15 1-84
+src/server/account-oauth.ts
+  s_3472be1b2cf028::t_8d415420b93a3e 1-58
+src/server/activity.ts
+  s_3472be1b2cf028::t_898eae138a081d 1-92
+src/server/app.ts
+  s_3472be1b2cf028::t_983d6a4d59dcb6 1,51,99-100,159,419,579-597,599,601-611,613-615,841,843,850,853-872,903,934,1595-1600,1644-1715,1719-1722,1725,1738-1741,2756,3658-3661,3676-3679,3827-3850
+src/server/commands.ts
+  s_3472be1b2cf028::t_47b6a695391cf2 83,429-430,554-574,579-585,601-604,612-616,639-647,651-664,666-673,864-868,901-909,1240-1284
+src/server/config.ts
+  s_3472be1b2cf028::t_a371c69c197e34 8-9,95-96,306-319
+src/server/design/scan.ts
+  s_3472be1b2cf028::t_f6e35088166659 303-311
+src/server/dictation-memory.ts
+  s_3472be1b2cf028::t_84345b257e9e72 1-261
+src/server/dictation.ts
+  s_3472be1b2cf028::t_a161a385c63126 1-443
+src/server/docs.ts
+  s_3472be1b2cf028::t_1a0e9da1887d8d 8-9,13-14
+src/server/extension-document-compat.ts
+  s_3472be1b2cf028::t_663b01167151a1 3,8,11-13
+src/server/extension-document-imports.ts
+  s_3472be1b2cf028::t_b5928ac47a9f5b 2-4,6,44-45,110-140,144-145
+src/server/extensions/browser.ts
+  s_3472be1b2cf028::t_f0104804d73091 17,185-196
+src/server/extensions/codemode.ts
+  s_3472be1b2cf028::t_df00d15af8423c 39,428
+src/server/extensions/machine-activity.ts
+  s_3472be1b2cf028::t_6fb15862b0156d 1-41
+src/server/extensions/plan.ts
+  s_3472be1b2cf028::t_3bc7d74ac42748 25
+src/server/extensions/prompt.ts
+  s_3472be1b2cf028::t_7dda377db23ec2 9-10,14-22,113-118,125,127-134,136-163
+src/server/extensions/subagents.ts
+  s_3472be1b2cf028::t_acdd89419e2d37 20-40,50,866-867,874-901,925-927
+src/server/extensions/tool-search.ts
+  s_3472be1b2cf028::t_dc548e43d4ea6c 31-35
+src/server/fast-mode-status.ts
+  s_3472be1b2cf028::t_d9013276819ed4 1-44
+src/server/fast-mode.ts
+  s_3472be1b2cf028::t_41b53f85776039 1-34
+src/server/heic.ts
+  s_3472be1b2cf028::t_b67a437791142a 101-109
+src/server/host.ts
+  s_3472be1b2cf028::t_e016fdab17e36b 13,22,404,493,545
+src/server/http/api.ts
+  s_3472be1b2cf028::t_fa1ca8cf87c1f5 25,42,57,163-246,725-734,743-769,832-834,840,851,879-882,963-968
+src/server/http/browser-routes.ts
+  s_3472be1b2cf028::t_48efc9dd1c3882 8,52-55,220-314
+src/server/http/conversation-routes.ts
+  s_3472be1b2cf028::t_0b9689f99ec28a 5,15-16,74-81,442-460,598-601,822-850
+src/server/model-images.ts
+  s_3472be1b2cf028::t_eade8c7242c225 84-89,91,149-158
+src/server/models.ts
+  s_3472be1b2cf028::t_7270a5d4cd032c 13,99-126,184-205,234
+src/server/prompts.ts
+  s_3472be1b2cf028::t_5008b64ab336bf 14-16,18,230-306
+src/server/providers.ts
+  s_3472be1b2cf028::t_69986974cb356a 14-15,17,23,82,84-89,103,107-196,544,551,553,573-574
+src/server/reload.ts
+  s_3472be1b2cf028::t_0b2d9434a011f7 32,60,101,136,665-670
+src/server/remote-browser.ts
+  s_3472be1b2cf028::t_33c6be8888fc63 1-154
+src/server/runtime-sdk.ts
+  s_3472be1b2cf028::t_64bc807a53c1ee 1-17
+src/server/spend.ts
+  s_3472be1b2cf028::t_dbb25e4ab52457 182-197
+src/server/subscription-usage.ts
+  s_3472be1b2cf028::t_1ecd093f13bfa8 1-430
+src/server/transcripts.ts
+  s_3472be1b2cf028::t_dc6b73a8e2b4b6 129-175
+src/server/workers.ts
+  s_3472be1b2cf028::t_8d9eaf364d9885 1-193
+src/server/workspace.ts
+  s_3472be1b2cf028::t_bcea328bc1a56f 28-30,48-51,103-106,112-117,131-134,170-189,228-235,282-285,326-418,423-426,539-550,566-571,607-617,634-642,706-714
+test/account-oauth.test.ts
+  s_3472be1b2cf028::t_20b60aac9ccca5 1-273
+test/activity-access.test.ts
+  s_3472be1b2cf028::t_cd8b40b56ea862 1-45
+test/activity-native.test.ts
+  s_3472be1b2cf028::t_eda8237904e984 1-73
+test/activity.test.ts
+  s_3472be1b2cf028::t_99814acd37dad6 1-137
+test/dictation-memory.test.ts
+  s_3472be1b2cf028::t_2f5d9a6e4603bb 1-180
+test/dictation.test.ts
+  s_3472be1b2cf028::t_85cac50f4d81f4 1-606
+test/fast-mode.test.ts
+  s_3472be1b2cf028::t_ac7b448e957121 1-107
+test/model-images.test.ts
+  s_3472be1b2cf028::t_ea9648e03b3356 160-180
+test/model-resolution.test.ts
+  s_3472be1b2cf028::t_b74a203cca1e5c 1-52
+test/prompt-budget.test.ts
+  s_3472be1b2cf028::t_b7daf06c7dff3b 11-12
+test/public-types.ts
+  s_3472be1b2cf028::t_14519dadd343aa 81-83
+test/remote-browser.test.ts
+  s_3472be1b2cf028::t_e6450ebfdc67cd 1-187
+test/sign-in-ui.test.ts
+  s_3472be1b2cf028::t_0ee6f3cfba828b 437
+test/subscription-usage.test.ts
+  s_3472be1b2cf028::t_956759f3a0e8ad 1-284
+test/workers.test.ts
+  s_3472be1b2cf028::t_63fcfbff7ef755 1-235
+web/composer.js
+  s_3472be1b2cf028::t_d28bb396d62f81 42,721,823-845,1027-1028,1418,1421-1449,1831,1842-1853,1909-1924,1988-1992
+web/dictation-core.js
+  s_3472be1b2cf028::t_c712df6c43e994 1-258
+web/dictation-learn.js
+  s_3472be1b2cf028::t_34673eb90064f0 1-167
+web/dictation.js
+  s_3472be1b2cf028::t_6ffabe0be73f3c 1-111
+web/launcher.js
+  s_3472be1b2cf028::t_b5c0462bd07e28 463,486-492
+web/model-selection.js
+  s_3472be1b2cf028::t_adf74a4dc65603 1-29
+web/notify.js
+  s_3472be1b2cf028::t_2d133ab20c859d 14,134-138,142-149,215-230,249,257,282
+web/sheets.js
+  s_3472be1b2cf028::t_905801b5edf9f6 32,35,200-202,337-339
+web/sheets/folder.js
+  s_3472be1b2cf028::t_2b4dc723b61820 35-49,82,149-151,179-196,201-203,210,224,238-241,279,289-292,404-405,470-476,499,527-559,636,753,755,797
+web/sheets/menu.js
+  s_3472be1b2cf028::t_3c0152e0eaaa14 564,566
+web/sheets/model.js
+  s_3472be1b2cf028::t_2eb4ffce40c2de 1-2,4-5,11,18,95-112,148-153,174-199,241,356,359-376,418,433,436,439-446,455-469,492-511
+web/sheets/providers.js
+  s_3472be1b2cf028::t_a340816e5aa007 4-12,536
+web/sheets/subscription-usage.js
+  s_3472be1b2cf028::t_6dcb4a9f5d719b 1-121
+web/sheets/voice.js
+  s_3472be1b2cf028::t_c8140ce8cf9b2c 1-146
+web/store.js
+  s_3472be1b2cf028::t_67a658a409c883 4,1866,1900,2606
+web/style.css
+  s_3472be1b2cf028::t_0c83f76731604c 3183-3228,4702-4710,20839-20910
+web/ui.js
+  s_3472be1b2cf028::t_5ddd4781b7a296 1163,1172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dfb0598f00cbd22a6c5515fbb9681886c13a6d89",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
