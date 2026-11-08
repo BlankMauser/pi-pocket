@@ -6,6 +6,8 @@ const LABELS = {
     start: "start session",
     send: "message session",
     list: "list sessions",
+    stop: "stop session",
+    archive: "archive session",
 };
 
 const text = (value) => (typeof value === "string" ? value : "");
@@ -14,9 +16,12 @@ export default function setup(pocket) {
     pocket.toolCall({
         tool: "team",
         icon: "fork",
-        label: (args) => LABELS[args.action] ?? "linked sessions",
+        label: (args) =>
+            args.action === "archive" && args.archived === false
+                ? "restore session"
+                : (LABELS[args.action] ?? "linked sessions"),
         subject: (args) =>
-            [args.action === "start" ? text(args.title) : "", text(args.message)]
+            [args.action === "start" ? text(args.title) : text(args.to), text(args.message)]
                 .filter((part) => part !== "")
                 .join(" · "),
         summary: (args) =>
@@ -24,6 +29,10 @@ export default function setup(pocket) {
                 ? { verb: "started", noun: "session" }
                 : args.action === "send"
                   ? { verb: "messaged", noun: "session", by: "to" }
-                  : { verb: "checked linked sessions" },
+                  : args.action === "stop"
+                    ? { verb: "stopped", noun: "session" }
+                    : args.action === "archive"
+                      ? { verb: args.archived === false ? "restored" : "archived", noun: "session" }
+                      : { verb: "checked linked sessions" },
     });
 }

@@ -110,7 +110,13 @@ export const LinkedSessionCallsDoc = defineDoc<{
              * has not finished.
              */
             result?:
-                { busy: boolean; stopping?: boolean } | { archived: boolean; repeating: number };
+                | {
+                      busy: boolean;
+                      stopping?: boolean;
+                      run?: number;
+                      stop?: { tasks: number[] };
+                  }
+                | { archived: boolean; repeating: number };
         }
     >;
 }>({

@@ -38,7 +38,9 @@ import {
     ProviderDoc,
     type Registry,
     type Storage,
+    type Submission,
     type SubmissionRecord,
+    type TaskId,
     UsageDoc,
     type UsageState,
 } from "@earendil-works/pi-durable";
@@ -71,6 +73,7 @@ import {
     DecisionsDoc,
     FolderFavoritesDoc,
     MemoryDoc,
+    PlanDoc,
     RunFailureDoc,
     type SessionMeta,
     SessionsDoc,
@@ -124,7 +127,8 @@ import { Providers } from "./providers.ts";
 import { CustomProviders } from "./custom-providers.ts";
 import { type EmbedderMessage, PushStore } from "./push.ts";
 import { type ExtensionInfo, ExtensionLoader, linkTypes, prepareDropInFolder } from "./reload.ts";
-import { ResendTask } from "./resend.ts";
+import { QueueControlDoc, queueInterrupt, ResendTask } from "./resend.ts";
+import { requestFor } from "./requests.ts";
 import {
     type Client,
     reportingOf,
@@ -931,6 +935,8 @@ export class PocketApp {
             },
             fetchPublic: createPublicFetch(),
             requesterOf: (conversationId) => this.attribution.requesterOf(conversationId),
+            interruptSubagent: (source, target, reporterId) =>
+                this.interruptSubagent(source, target, reporterId),
             machineActivity: (source, machineId) => this.machineActivity(source, machineId),
             roleOf: (personId) => this.config.userById(personId)?.role,
             on: (event, listener) => this.events.on(event, listener),
@@ -1030,6 +1036,7 @@ export class PocketApp {
                     await tx.doc(AuthorsDoc, conversation.id);
                     await tx.doc(ArtifactsDoc, conversation.id);
                     await tx.doc(SubagentsDoc, conversation.id);
+                    await tx.doc(QueueControlDoc, conversation.id);
                 },
                 onReport: (report) => this.notice("warning", describe(report.error)),
             },
@@ -1681,6 +1688,92 @@ export class PocketApp {
                 return pending;
             },
         );
+    }
+
+    /** Deliver an admitted subagent interrupt; extensions cannot choose its person or invent its message. */
+    async interruptSubagent(
+        source: ConversationId,
+        target: ConversationId,
+        reporterId: TaskId,
+    ): Promise<Submission> {
+        let requestId = "";
+        const taskId = await this.harness.commit(async (tx) => {
+            const reporter = await tx.task(reporterId);
+            const children = await tx.doc(SubagentsDoc, source);
+            const input = reporter?.input as
+                | {
+                      conversationId?: unknown;
+                      interrupt?: unknown;
+                      message?: unknown;
+                      requestedBy?: unknown;
+                  }
+                | undefined;
+
+            if (
+                reporter?.kind !== "pocket.subagent-reporter" ||
+                reporter.conversationId !== source ||
+                !Object.values(children.reporters).includes(reporterId) ||
+                !Object.values(children.agents).some((agent) => agent.conversationId === target) ||
+                input?.conversationId !== target ||
+                input.interrupt !== true ||
+                typeof input.message !== "string" ||
+                input.message.trim() === ""
+            ) {
+                throw new HttpError(403, "This is not an admitted subagent interrupt.");
+            }
+
+            const requestedBy = input.requestedBy;
+            const user =
+                typeof requestedBy === "string" ? this.config.userById(requestedBy) : undefined;
+
+            if (user === undefined) {
+                throw new HttpError(403, "The person who requested this interrupt is unavailable.");
+            }
+
+            this.requireSee(user, source);
+            this.requireSee(user, target);
+            this.requireSteer(user);
+
+            const turns = await tx.doc(TurnsDoc, this.rootOf(source));
+            const parentPlan = await tx.doc(PlanDoc, source);
+            const childPlan = await tx.doc(PlanDoc, target);
+
+            if (turns.on && turns.driver !== user.id) {
+                throw new HttpError(409, "Take turns is on: take the wheel first.");
+            }
+
+            if (parentPlan.on || childPlan.on) {
+                throw new HttpError(409, "An interrupt is unavailable in plan mode.");
+            }
+
+            this.spend.check(user, source);
+            this.spend.check(user, target);
+            requestId = requestFor(user.id, `subagent-${reporterId}`);
+
+            return queueInterrupt(
+                tx,
+                target,
+                { content: input.message, requestId },
+                this.commands.interruptTask,
+            );
+        }, context);
+
+        if (taskId !== undefined) {
+            await this.harness.waitForTask(taskId, context);
+        }
+
+        const record = await this.harness.commit(
+            (tx) => tx.submissionByRequest(target, requestId),
+            context,
+        );
+        const submission =
+            record === undefined ? undefined : await this.harness.submission(record.id, context);
+
+        if (submission === undefined) {
+            throw new HttpError(409, "The subagent interrupt was not delivered.");
+        }
+
+        return submission;
     }
 
     async machineActivity(source: ConversationId, requestedMachine?: string): Promise<unknown> {

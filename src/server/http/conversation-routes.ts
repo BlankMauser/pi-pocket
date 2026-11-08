@@ -198,6 +198,18 @@ export async function conversationRoutes(
         );
     }
 
+    if (third === "queue" && method === "POST") {
+        const body = await readJson<{ action?: unknown; ids?: unknown }>(request);
+
+        if (body.action !== "steer" && body.action !== "interrupt") {
+            throw new HttpError(400, "Choose steer or interrupt for the selected queue.");
+        }
+
+        await app.commands.moveQueuedMany(id, user, body.ids, body.action);
+
+        return json(response, 200, { ok: true });
+    }
+
     if (third === "move" && method === "POST") {
         const body = await readJson<{ submissionId?: number; mode?: string }>(request);
 

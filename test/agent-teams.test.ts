@@ -98,7 +98,7 @@ test("agents write to each other in their person's language, ASD-STE100 in Engli
     );
     assert.match(
         all,
-        /Write each message to a subagent \(spawn and send\) in the language of the person you work for \(in ASD-STE100 when it is English\)/,
+        /Write each message to a subagent \(spawn, send and interrupt\) in the language of the person you work for \(in ASD-STE100 when it is English\)/,
     );
     assert.match(all, /ask for the report in that language too/);
     // The linked session: the message asks for the reply in its own language, under a marker its prompt names.

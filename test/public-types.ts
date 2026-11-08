@@ -80,7 +80,8 @@ type Internal =
     | "memory"
     | "toolNames"
     | "workers"
-    | "machineActivity";
+    | "machineActivity"
+    | "interruptSubagent";
 
 type PublicHost = Pick<PocketHost, keyof Host>;
 

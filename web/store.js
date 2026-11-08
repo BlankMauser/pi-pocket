@@ -2707,6 +2707,8 @@ export const actions = {
     withdraw: (submissionId) => api(`c/${current()}/withdraw`, { submissionId }),
     /** Move one's own queued message to "steer" or "followUp", or send it now with "interrupt". */
     move: (submissionId, mode) => api(`c/${current()}/move`, { submissionId, mode }),
+    /** Atomically move the selected own queued messages, preserving their order and all other pending work. */
+    moveQueuedAll: (action, ids, id = current()) => api(`c/${id}/queue`, { action, ids }),
     editQueued: (submissionId, id = current()) => api(`c/${id}/edit-queued`, { submissionId }),
     configure: (change) => api(`c/${current()}/configure`, change),
     /** The owner's model and thinking level for new sessions, `{ provider, modelId, thinkingLevel }`; null clears it. */

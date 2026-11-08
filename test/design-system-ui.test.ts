@@ -2550,6 +2550,11 @@ test(
                 `return JSON.stringify(document.documentElement.scrollWidth <= 391)`,
             ),
         );
+        // SectionTabs marks overflow in its after-paint effect, after the system's DOM is ready.
+        await waitFor(
+            "the phone tab overflow marker",
+            `return JSON.stringify(document.querySelector(".dsy-tabs")?.dataset.more === "right")`,
+        );
         assert.deepEqual(
             await inPage<{ apart: boolean; whole: boolean; more: string }>(`
                 const bar = document.querySelector(".dsy-tabs").getBoundingClientRect();

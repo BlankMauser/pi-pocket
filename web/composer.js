@@ -307,14 +307,14 @@ const SEND_MODES = [
     [
         "interrupt",
         "Interrupt",
-        "Stops the run right now (also its tool call) and clears the queue, then sends it",
+        "Stops the run right now (also its tool call), then sends this. Other queued messages and subagent work stay queued",
     ],
 ];
 
 /** What a send mode does, for a queued message's buttons. */
 const modeHint = (mode) => SEND_MODES.find(([value]) => value === mode)[2];
 
-/** What Interrupt does to a message waiting in the queue: the others there stay, unlike the composer's Interrupt. */
+/** Interrupt sends the selected messages; the rest of the queue stays. */
 const QUEUED_INTERRUPT_HINT =
     "Stops the run right now (also its tool call), then sends this one. The other queued messages stay queued";
 
@@ -573,8 +573,11 @@ export function Composer() {
     const [sendMode, setSendMode] = useState("steer");
     // The queued message tapped open, wrapped: one line each until then. The queue holds only a message's start.
     const [reading, setReading] = useState(null);
-    // The queued message whose Interrupt was tapped once (`CONFIRM_INTERRUPT`).
+    // The queued message or bulk selection whose Interrupt was tapped once (`CONFIRM_INTERRUPT`).
     const [interrupting, setInterrupting] = useState(null);
+    // Bulk queue actions are one request, apart from the draft's retained send/request id.
+    const [queueSending, setQueueSending] = useState(false);
+    const queueRequest = useRef(false);
     // Slash command suggestions: the highlighted one, and whether Escape hid the list.
     const [pick, setPick] = useState(0);
     const [hideCommands, setHideCommands] = useState(false);
@@ -964,6 +967,7 @@ export function Composer() {
     const uploading = files.some((file) => file.state === "uploading");
     const canSend =
         !sending &&
+        !queueSending &&
         !uploading &&
         (text.trim() !== "" ||
             store.state.replyQuote ||
@@ -1011,7 +1015,7 @@ export function Composer() {
 
     // `other`: Ctrl/⌘+Enter, which sends the other way round (Steer and Queue swap; Interrupt stays).
     const send = async (other = false) => {
-        if (!canSend) {
+        if (!canSend || queueRequest.current) {
             return;
         }
 
@@ -1402,6 +1406,45 @@ export function Composer() {
           : "Ask Pi anything…";
     const inbox = view.inbox ?? [];
     const { me, users } = store.state;
+    const ownQueued = inbox.filter(
+        (item) =>
+            item.by !== undefined &&
+            item.by === me?.id &&
+            !queuedReports(item) &&
+            (item.mode === "steer" || item.mode === "followUp"),
+    );
+    // A changed selection needs a fresh confirmation, even within the four-second window.
+    const bulkInterrupt = `all:${ownQueued.map((item) => item.id).join(",")}`;
+
+    const moveAll = async (action) => {
+        if (queueRequest.current || onTheWay.has(conversationId) || ownQueued.length === 0) {
+            return;
+        }
+
+        if (action === "interrupt" && CONFIRM_INTERRUPT && interrupting !== bulkInterrupt) {
+            setInterrupting(bulkInterrupt);
+
+            return;
+        }
+
+        queueRequest.current = true;
+        setQueueSending(true);
+        setInterrupting(null);
+
+        try {
+            await attempt(() =>
+                actions.moveQueuedAll(
+                    action,
+                    ownQueued.map((item) => item.id),
+                    conversationId,
+                ),
+            );
+        } finally {
+            queueRequest.current = false;
+            setQueueSending(false);
+        }
+    };
+
     const queuedBy = (item) =>
         item.by === undefined
             ? ""
@@ -1485,6 +1528,33 @@ export function Composer() {
                 </div>`
             }
             ${
+                ownQueued.length > 0 &&
+                canSteer() &&
+                !blocked &&
+                html`<div class="queued-actions queue-bulk-actions" role="group" aria-label="Your queued messages">
+                    <button
+                        class="button small"
+                        disabled=${sending || queueSending}
+                        title="Send all your queued messages to Pi between steps, in queue order. Other people's messages and subagent reports stay queued"
+                        onClick=${() => void moveAll("steer")}
+                    >
+                        Steer all (${ownQueued.length})
+                    </button>
+                    <button
+                        class=${`button small ${interrupting === bulkInterrupt ? "danger" : ""}`}
+                        disabled=${sending || queueSending}
+                        title=${
+                            interrupting === bulkInterrupt
+                                ? "Tap again to stop the run and send all your queued messages. Other people's messages and subagent work stay queued"
+                                : "Stop the run and send all your queued messages in queue order. Other people's messages and subagent work stay queued"
+                        }
+                        onClick=${() => void moveAll("interrupt")}
+                    >
+                        ${interrupting === bulkInterrupt ? "Interrupt + send all?" : `Interrupt + send all (${ownQueued.length})`}
+                    </button>
+                </div>`
+            }
+            ${
                 inbox.length > 0 &&
                 html`<div class="inbox">
                     ${inbox.map(
@@ -1506,6 +1576,7 @@ export function Composer() {
                                 html`<button
                                     class="icon-button small queued-remove"
                                     aria-label=${queuedReports(item) ? "Discard these reports" : "Withdraw"}
+                                    disabled=${queueSending}
                                     title=${queuedReports(item) ? "Discard these reports: Pi will not get them" : "Withdraw"}
                                     onClick=${() => attempt(() => actions.withdraw(item.id))}
                                 >
@@ -1524,6 +1595,7 @@ export function Composer() {
                                     <button
                                         class="button small"
                                         title="Take it back into the message box to change it"
+                                        disabled=${queueSending}
                                         onClick=${() => editQueued(item)}
                                     >
                                         Edit
@@ -1531,6 +1603,7 @@ export function Composer() {
                                     <button
                                         class="button small"
                                         title=${modeHint(item.mode === "steer" ? "followUp" : "steer")}
+                                        disabled=${queueSending}
                                         onClick=${() =>
                                             attempt(() =>
                                                 actions.move(
@@ -1543,6 +1616,7 @@ export function Composer() {
                                     </button>
                                     <button
                                         class=${`button small ${interrupting === item.id ? "danger" : ""}`}
+                                        disabled=${queueSending}
                                         title=${
                                             interrupting === item.id
                                                 ? "Tap again to stop the run and send this now. The other queued messages stay queued"

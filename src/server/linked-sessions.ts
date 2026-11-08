@@ -3,13 +3,14 @@
  * at the target's next pause, and each one's final answer carried back to the session that started it.
  */
 import { createHash, randomUUID } from "node:crypto";
-import type { Context } from "@earendil-works/chord";
+import { copyJson, type Context } from "@earendil-works/chord";
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import {
     AgentDoc,
     type AgentState,
     AssistantEntry,
+    LiveDoc,
     type ConversationId,
     type ModelRef,
     type Tx,
@@ -64,7 +65,9 @@ function tooLong(message: string): void {
     }
 }
 
-type CallOutcome = { busy: boolean; stopping?: boolean } | { archived: boolean; repeating: number };
+type CallOutcome =
+    | { busy: boolean; stopping?: boolean; run?: number; stop?: { tasks: number[] } }
+    | { archived: boolean; repeating: number };
 type CallRecord = { conversationId?: number; by?: string; at: number; result?: CallOutcome };
 
 /** The record of call `token` in `calls`, made when there is none, the oldest pruned to make room. */
@@ -976,12 +979,13 @@ export class LinkedSessions implements LinkedSessionsApi {
         }
 
         await this.#mayAct(source, id, user);
-        // The receipt is stored with the busy state, marked `stopping`, before the run stops, and marked done after.
-        // A repeat that finds it done stops nothing. One that finds `stopping` (a crash came between) stops again,
-        // which is safe, and finishes it. A key for another session is refused here.
-        const claimed = await this.#claim(source, token, id, user, {
-            busy: app.isBusy(id),
-            stopping: true,
+        // Capture Stop's work and its one-time queue withdrawal in the same
+        // commit as the receipt. A crash replay only finishes that captured work.
+        const claimed = await this.#claim(source, token, id, user, async (tx) => {
+            const busy = (await tx.doc(LiveDoc, id)).run !== undefined;
+            const stop = await app.commands.captureStop(tx, id);
+
+            return { busy, stopping: true, stop };
         });
 
         if (!("busy" in claimed.result)) {
@@ -994,9 +998,19 @@ export class LinkedSessions implements LinkedSessionsApi {
             return { busy };
         }
 
-        // The stop a person gets, then awaited, so the caller sees the run stopped.
-        await app.commands.abort(id, user);
-        await (await app.conversation(id)).abort(context);
+        if (claimed.fresh && busy) {
+            await app.collab.activity(id, user, "stopped the run");
+        }
+
+        // No conversation-wide abort here: newer work may already have started.
+        // Legacy receipts name only their captured generation, or nothing.
+        await app.commands.finishStop(
+            claimed.result.stop ?? {
+                tasks: claimed.result.run === undefined ? [] : [claimed.result.run],
+            },
+            context,
+        );
+
         await app.harness.commit(async (tx) => {
             recordOf(await tx.doc(LinkedSessionCallsDoc, source), token, app.now()).result = {
                 busy,
@@ -1130,16 +1144,15 @@ export class LinkedSessions implements LinkedSessionsApi {
     }
 
     /**
-     * Take `token` for `target` before the action, when the action itself cannot share the receipt's commit. A repeat
-     * that already has a result returns it. A key for another session is refused, and two calls at once cannot both
-     * take it.
+     * Admit `capture` once, in the same commit as its receipt. Completion can resume outside that commit using only
+     * the captured work. A repeat returns its first receipt; a key for another target is refused before mutation.
      */
     async #claim(
         source: ConversationId,
         token: string,
         target: ConversationId,
         user: User,
-        result: CallOutcome,
+        capture: (tx: Tx) => Promise<CallOutcome>,
     ): Promise<{ fresh: boolean; result: CallOutcome }> {
         const app = this.#app;
 
@@ -1151,8 +1164,10 @@ export class LinkedSessions implements LinkedSessionsApi {
             }
 
             if (record.result !== undefined) {
-                return { fresh: false, result: { ...record.result } as CallOutcome };
+                return { fresh: false, result: copyJson(record.result) as CallOutcome };
             }
+
+            const result = await capture(tx);
 
             record.conversationId = Number(target);
             record.by ??= user.id;

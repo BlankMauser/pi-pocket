@@ -633,17 +633,17 @@ test("stop ends a linked session's run and does nothing when it is idle", async 
             { message: "STREAM_A_WHILE" },
             "h2",
         );
-        const abort = isolated.commands.abort.bind(isolated.commands);
+        const finishStop = isolated.commands.finishStop.bind(isolated.commands);
 
         await until(() => isolated.isBusy(second.session), "the second run to start");
-        isolated.commands.abort = (async () => {
+        isolated.commands.finishStop = (async () => {
             throw new Error("cut off");
         }) as never;
         await assert.rejects(
             isolated.linkedSessions.stop(origin, { to: second.address }, "cut"),
             /cut off/,
         );
-        isolated.commands.abort = abort as never;
+        isolated.commands.finishStop = finishStop as never;
         assert.equal(isolated.isBusy(second.session), true);
         assert.deepEqual(
             await isolated.linkedSessions.stop(origin, { to: second.address }, "cut"),

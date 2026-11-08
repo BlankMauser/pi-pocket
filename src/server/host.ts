@@ -7,6 +7,7 @@ import type {
     DocumentReader,
     Extension,
     ModelRef,
+    Submission,
     TaskId,
     Tx,
 } from "@earendil-works/pi-durable";
@@ -457,6 +458,12 @@ export interface PocketHost {
     readonly fetchPublic: FetchPublic;
     /** Who Pi works for in a conversation now: whose message led to its current work. */
     requesterOf(conversationId: ConversationId): string | undefined;
+    /** Built-in subagents only: deliver the interrupt already admitted as this reporter task, keeping its queue. */
+    interruptSubagent?(
+        source: ConversationId,
+        target: ConversationId,
+        reporterId: TaskId,
+    ): Promise<Submission>;
     /**
      * The role of a person by id, as core decides it; undefined for an id that is not a person here.
      *

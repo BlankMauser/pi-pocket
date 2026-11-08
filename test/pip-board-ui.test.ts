@@ -622,7 +622,7 @@ test("Text put in the box during a send waits for its own session, all of it", r
 test("A queued message's Edit during a send: kept through a reload or a move", real, async () => {
     const queued = `[...document.querySelectorAll('.pane .queued-text')]
         .find((each) => each.textContent.includes('tell him'))`;
-    const EDIT = "document.querySelector('.pane .queued-actions .button')";
+    const EDIT = "document.querySelector('.pane .inbox .queued-actions .button')";
     const back = (words: string, what: string) =>
         see(`document.querySelector('${BOX}').value === '${words}'`, what);
 

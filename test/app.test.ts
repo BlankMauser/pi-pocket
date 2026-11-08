@@ -1611,7 +1611,7 @@ test("a tab does not get the session list again when it did not change", async (
     }
 });
 
-test("interrupt stops a streaming run and withdraws the queue, then Pi answers the new message", async () => {
+test("interrupt stops a streaming run and preserves the queue, then Pi answers both messages", async () => {
     const id = await newSession();
     const started = Date.now();
 
@@ -1628,7 +1628,10 @@ test("interrupt stops a streaming run and withdraws the queue, then Pi answers t
     const texts = (await modelTexts(app, id)).join("\n");
 
     assert.match(texts, /echo: never mind/);
-    assert.doesNotMatch(texts, /queued one/);
+    await until(
+        async () => (await modelTexts(app, id)).some((text) => text.includes("echo: queued one")),
+        "the preserved queued message to be answered",
+    );
     assert.ok(Date.now() - started < 4000, "it did not wait for the long answer");
 });
 

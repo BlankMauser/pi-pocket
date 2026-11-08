@@ -3,16 +3,23 @@
  * the message went out cannot leave the fork without it. Whoever sends it again sends it right away as well; with one
  * request id per fork, it goes out once either way.
  */
-import type { Context } from "@earendil-works/chord";
+import { copyJson, type Context } from "@earendil-works/chord";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import {
     defineTask,
+    defineDoc,
+    InboxDoc,
+    LiveDoc,
+    type ConversationId,
+    type Cursor,
+    type Task,
+    type TaskId,
+    type Tx,
     type EntryId,
     type InputEntry,
     type UserInput,
 } from "@earendil-works/pi-durable";
 import { CONTEXT_BLOCK, FILE_BLOCK } from "./entry-format.ts";
-import { describe } from "./errors.ts";
 import { ownRequest } from "./requests.ts";
 
 /** What a fork sends: the text, by whom, and the message whose images go along, when the model takes images. */
@@ -91,6 +98,20 @@ export const ResendTask = defineTask<Resend, { phase: "send" }, null>({
         runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
 });
 
+/** Stop's admission counter fences pending interrupts, including older background tasks without a counter. */
+export const QueueControlDoc = defineDoc<{ stop: number }>({
+    kind: "pocket.queue-control",
+    version: 1,
+    checkpointWhen: () => true,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ stop: 0 }),
+});
+
+/** Exact task identities present when Stop was admitted; replay only joins these, never newer work. */
+export type StopReceipt = { tasks: number[] };
+
 /** A queued message that stays queued across an Interrupt: sent again, in its place, under its own request id. */
 export type Requeue = {
     content: UserInput;
@@ -108,18 +129,72 @@ export type Interrupt = {
     requestId: string;
     /** The run that was going when the message was moved: only that run is stopped, never one that came after. */
     run?: number;
+    /** Absent in legacy persisted tasks: the initial stop counter was zero. */
+    stopAt?: number;
     others?: Requeue[];
 };
 
-/** Stops run `run` (a task id) and waits for its end; nothing when it has ended or is not known. */
+/**
+ * Admit one durable interrupt on the transaction line. The generation is captured once, and a retry joins the same
+ * task or finds the delivered submission. No queued submission is withdrawn, including reports and child work.
+ */
+export async function queueInterrupt(
+    tx: Tx,
+    id: ConversationId,
+    input: Pick<Interrupt, "content" | "requestId">,
+    definition: Task<Interrupt, { phase: "send" }, null, object>,
+): Promise<TaskId | undefined> {
+    if ((await tx.submissionByRequest(id, input.requestId)) !== undefined) {
+        return undefined;
+    }
+
+    let cursor: Cursor | undefined;
+
+    do {
+        const page = await tx.scanTasks(
+            { conversationId: id, kind: "pocket.interrupt" },
+            100,
+            cursor,
+        );
+        const existing = page.items.find(
+            (task) => (task.input as Interrupt).requestId === input.requestId,
+        );
+
+        if (existing !== undefined) {
+            if (
+                existing.state.status === "terminal" &&
+                existing.state.outcome.status !== "completed"
+            ) {
+                throw new Error(
+                    "The interrupt could not be delivered; its durable task needs recovery.",
+                );
+            }
+
+            return existing.id;
+        }
+
+        cursor = page.next;
+    } while (cursor !== undefined);
+
+    const live = await tx.doc(LiveDoc, id);
+    const stopAt = (await tx.doc(QueueControlDoc, id)).stop;
+    const run = live.run === undefined ? undefined : Number(live.run.taskId);
+
+    return tx.createTask(
+        definition,
+        { ...input, stopAt, ...(run === undefined ? {} : { run }) },
+        { ownership: { kind: "conversation" }, background: false, conversationId: id },
+    );
+}
+
+/** Stops only the captured generation; persistent subagent anchors are background work outside this generation. */
 export type StopRun = (run: number, context: Context) => Promise<void>;
 
 /**
- * Stops the run, then sends a queued message that the commit making this task took out of the queue, so a restart
- * in between cannot lose it, and puts the other messages that were queued back. Every message has a request id, so a
- * restart at any point sends each once. Background, so the stop does not stop this task too. It stops the run it was
- * made for by its id (`stopRun`, from the app's harness), never whichever run is going: one that started after it ended
- * goes on.
+ * Stop the captured generation, then admit the instruction ahead of pending inputs in one commit. Temporarily
+ * holding the inbox only inside that commit keeps original submission IDs, senders, modes and report receipts.
+ * Admission and restoration are atomic: a crash can expose neither an empty queue nor half a delivered interrupt.
+ * `others` remains readable for durable tasks written by older Pocket versions.
  */
 export const interruptTask = (stopRun: StopRun) =>
     defineTask<Interrupt, { phase: "send" }, null>({
@@ -128,61 +203,84 @@ export const interruptTask = (stopRun: StopRun) =>
         initial: () => ({ phase: "send" }),
         phases: {
             send: async (task, runtime, context) => {
-                const { content, requestId, run, others } = task.input;
+                const { content, requestId, run, others, stopAt = 0 } = task.input;
                 const id = runtime.conversationId;
                 let sent = false;
+                let cancelled = false;
 
-                // Run again after a restart: after the send, the run it started must not be stopped.
                 await runtime.commit(async (tx) => {
                     sent = (await tx.submissionByRequest(id, requestId)) !== undefined;
+                    cancelled = (await tx.doc(QueueControlDoc, id)).stop !== stopAt;
 
-                    return undefined;
+                    return cancelled
+                        ? { status: "terminal", outcome: { status: "aborted" } }
+                        : undefined;
                 }, context);
+
+                if (cancelled) {
+                    return;
+                }
 
                 const conversation = await runtime.conversation(id, context);
 
-                if (!sent) {
-                    // The message has left the queue: a failure here must say so, not fault the task without a word.
-                    try {
-                        if (run !== undefined) {
-                            await stopRun(run, context);
-                        }
-
-                        await conversation?.submit({ type: "input", content, requestId }, context);
-                    } catch (error) {
-                        if (context.abortSignal?.aborted === true) {
-                            throw error;
-                        }
-
-                        runtime.report(
-                            new Error(
-                                `A message moved to Interrupt was not sent: ${describe(error)}`,
-                            ),
-                        );
-                    }
+                if (conversation === undefined) {
+                    throw new Error("The interrupt conversation is missing.");
                 }
 
-                // In their order, behind the message: a request id already known finds its submission.
-                for (const other of others ?? []) {
-                    try {
-                        await conversation?.submit(
-                            {
-                                type: "input",
-                                content: other.content,
-                                whenBusy: other.mode,
-                                requestId: other.requestId,
-                                ...(other.entry === undefined ? {} : { entry: other.entry }),
-                            },
-                            context,
-                        );
-                    } catch (error) {
-                        if (context.abortSignal?.aborted === true) {
-                            throw error;
+                if (!sent) {
+                    if (run !== undefined) {
+                        await stopRun(run, context);
+                    }
+
+                    await runtime.commit(async (tx) => {
+                        cancelled = (await tx.doc(QueueControlDoc, id)).stop !== stopAt;
+
+                        if (cancelled) {
+                            return { status: "terminal", outcome: { status: "aborted" } };
                         }
 
-                        runtime.report(
-                            new Error(`A queued message was not queued again: ${describe(error)}`),
-                        );
+                        if ((await tx.submissionByRequest(id, requestId)) !== undefined) {
+                            return undefined;
+                        }
+
+                        const inbox = await tx.doc(InboxDoc, id);
+                        const waiting = copyJson(inbox.items) as typeof inbox.items;
+
+                        // An idle submission otherwise runs the older queue first. Keep it on this transaction only.
+                        inbox.items = [];
+                        await conversation.submit(tx, { type: "input", content, requestId });
+                        inbox.items.push(...waiting);
+
+                        return undefined;
+                    }, context);
+                }
+
+                if (cancelled) {
+                    return;
+                }
+
+                // Legacy held messages obey the same Stop fence; none may be restored after a later Stop.
+                for (const other of others ?? []) {
+                    await runtime.commit(async (tx) => {
+                        cancelled = (await tx.doc(QueueControlDoc, id)).stop !== stopAt;
+
+                        if (cancelled) {
+                            return { status: "terminal", outcome: { status: "aborted" } };
+                        }
+
+                        await conversation.submit(tx, {
+                            type: "input",
+                            content: other.content,
+                            whenBusy: other.mode,
+                            requestId: other.requestId,
+                            ...(other.entry === undefined ? {} : { entry: other.entry }),
+                        });
+
+                        return undefined;
+                    }, context);
+
+                    if (cancelled) {
+                        return;
                     }
                 }
 
