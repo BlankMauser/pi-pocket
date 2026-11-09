@@ -1,0 +1,19 @@
+web/model-selection.js
+  s_3472be1b2cf028::t_7b71b8c7e5686f 4,13-14,18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e227fb8805813f88638dad286901878c8ac71582",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
