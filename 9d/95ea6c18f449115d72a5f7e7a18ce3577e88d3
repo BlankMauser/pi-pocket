@@ -1,0 +1,53 @@
+contrib/usage-watchdog-control.py
+  s_3472be1b2cf028::t_c3a64a2af90582 1-209
+docs/usage-watchdogs.md
+  s_3472be1b2cf028::t_63d025844bdd55 1-32
+src/server/http/api.ts
+  s_3472be1b2cf028::t_75ea22e8dcb32d 43,59,965-986
+src/server/usage-watchdogs.ts
+  s_3472be1b2cf028::t_12b4f257565122 1-123
+test/peeks-ui.test.ts
+  s_3472be1b2cf028::t_706b250209e299 255-379
+test/usage-watchdog-control.test.py
+  s_3472be1b2cf028::t_0ac6278ad0d68e 1-146
+test/usage-watchdogs-ui.test.ts
+  s_3472be1b2cf028::t_a9d7ed934d1022 1-367
+test/usage-watchdogs.test.ts
+  s_3472be1b2cf028::t_d7b8f0c57cd11c 1-162
+web/app.js
+  s_3472be1b2cf028::t_da1797af956038 576
+web/launcher.js
+  s_3472be1b2cf028::t_49560dc418921b 486-492
+web/peeks.js
+  s_3472be1b2cf028::t_155f40a613024b 1-2,95-138,140-143,198,215,224,226,235-240,246,762-763,787,919-951,980,983,996-1002
+web/sheets.js
+  s_3472be1b2cf028::t_d91a48c419614c 33,338-340
+web/sheets/appearance.js
+  s_3472be1b2cf028::t_78e6c65ceb729e 661
+web/sheets/menu.js
+  s_3472be1b2cf028::t_9539df66ea5056 565
+web/sheets/subscription-usage.js
+  s_3472be1b2cf028::t_57dc9739394667 2,100
+web/sheets/usage-watchdogs.js
+  s_3472be1b2cf028::t_e815f0fb3cd467 1-128
+web/style.css
+  s_3472be1b2cf028::t_88322e8da59026 13109-13138
+web/theme.js
+  s_3472be1b2cf028::t_041741cf71c090 77,79-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9d95ea6c18f449115d72a5f7e7a18ce3577e88d3",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
