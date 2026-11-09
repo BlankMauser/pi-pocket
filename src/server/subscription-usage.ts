@@ -6,6 +6,8 @@ export type UsageWindow = {
     label: string;
     usedPercent: number;
     resetAt: string | null;
+    allowancePercentOfWeekly?: number;
+    usedPercentOfWeekly?: number;
 };
 export type SubscriptionAccount = {
     id: string;
@@ -16,6 +18,7 @@ export type SubscriptionAccount = {
     nextCheckAt: string;
     stale: boolean;
     message?: string;
+    fableMessage?: string;
 };
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): ObjectValue =>
@@ -41,6 +44,7 @@ const iso = (value: unknown): string | null => {
 const CLAUDE_WINDOWS: Record<string, string> = {
     five_hour: "Five hours",
     seven_day: "Weekly",
+    seven_day_fable: "Weekly · Fable",
     seven_day_opus: "Weekly · Opus",
     seven_day_sonnet: "Weekly · Sonnet",
     seven_day_oauth_apps: "Weekly · OAuth apps",
@@ -49,13 +53,75 @@ const CLAUDE_WINDOWS: Record<string, string> = {
 
 export function claudeWindows(payload: unknown): UsageWindow[] {
     const data = object(payload);
+    const windows = new Map<string, UsageWindow>();
 
-    return Object.entries(CLAUDE_WINDOWS).flatMap(([id, label]) => {
+    for (const [id, label] of Object.entries(CLAUDE_WINDOWS)) {
         const window = object(data[id]);
 
-        return percent(window.utilization)
-            ? [{ id, label, usedPercent: window.utilization, resetAt: iso(window.resets_at) }]
-            : [];
+        if (percent(window.utilization)) {
+            windows.set(id, {
+                id,
+                label,
+                usedPercent: window.utilization,
+                resetAt: iso(window.resets_at),
+            });
+        }
+    }
+
+    // New Claude responses put scoped model limits beside the shared limits. is_active marks the
+    // currently binding limit, not whether a reported Fable allowance exists.
+    const limits = Array.isArray(data.limits) ? data.limits : [];
+    const shares = Array.isArray(data.weekly_scoped_shares) ? data.weekly_scoped_shares : [];
+
+    for (const [index, value] of limits.entries()) {
+        const row = object(value);
+        const model = object(object(row.scope).model);
+        const family = [model.id, model.display_name]
+            .filter((v) => typeof v === "string")
+            .join(" ");
+        const scoped = row.kind === "weekly_scoped";
+        const id =
+            row.kind === "session"
+                ? "five_hour"
+                : row.kind === "weekly_all"
+                  ? "seven_day"
+                  : scoped && /(?:^|[-\s])fable(?:$|[-\s])/i.test(family)
+                    ? "seven_day_fable"
+                    : scoped && /(?:^|[-\s])opus(?:$|[-\s])/i.test(family)
+                      ? "seven_day_opus"
+                      : scoped && /(?:^|[-\s])sonnet(?:$|[-\s])/i.test(family)
+                        ? "seven_day_sonnet"
+                        : undefined;
+
+        if (id === undefined || !percent(row.percent)) {
+            continue;
+        }
+
+        const share = object(shares.find((entry) => object(entry).limit_index === index));
+        const window: UsageWindow = {
+            id,
+            label: CLAUDE_WINDOWS[id]!,
+            usedPercent: row.percent,
+            resetAt: iso(row.resets_at),
+        };
+
+        if (id === "seven_day_fable") {
+            if (percent(share.allowance_percent_of_weekly)) {
+                window.allowancePercentOfWeekly = share.allowance_percent_of_weekly;
+            }
+
+            if (percent(share.used_percent_of_weekly)) {
+                window.usedPercentOfWeekly = share.used_percent_of_weekly;
+            }
+        }
+
+        windows.set(id, window);
+    }
+
+    return Object.keys(CLAUDE_WINDOWS).flatMap((id) => {
+        const window = windows.get(id);
+
+        return window === undefined ? [] : [window];
     });
 }
 

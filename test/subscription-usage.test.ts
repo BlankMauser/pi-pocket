@@ -282,3 +282,81 @@ test("native Kimi and OpenCode Go usage is cached, authenticated and excludes cr
     await usage.summary();
     assert.equal(requests.length, 2);
 });
+
+test("Claude modern Fable limits use scoped percentages and original share indices, even when not binding", () => {
+    const payload = {
+        seven_day: { utilization: 99, resets_at: null },
+        limits: [
+            { kind: "ignored", percent: 91 },
+            { kind: "session", percent: 15, resets_at: "2026-11-10T02:00:00Z" },
+            { kind: "weekly_all", percent: 40, resets_at: "2026-11-16T09:00:00Z" },
+            {
+                kind: "weekly_scoped",
+                percent: 12,
+                is_active: false,
+                resets_at: "2026-11-16T09:00:00Z",
+                scope: { model: { id: null, display_name: "Fable" } },
+            },
+        ],
+        weekly_scoped_shares: [
+            { limit_index: 3, used_percent_of_weekly: 6, allowance_percent_of_weekly: 50 },
+        ],
+        private_account_data: "must-not-escape",
+    };
+    const windows = claudeWindows(payload);
+
+    assert.deepEqual(
+        windows.map((window) => [window.id, window.usedPercent]),
+        [
+            ["five_hour", 15],
+            ["seven_day", 40],
+            ["seven_day_fable", 12],
+        ],
+    );
+    assert.deepEqual(windows[2], {
+        id: "seven_day_fable",
+        label: "Weekly · Fable",
+        usedPercent: 12,
+        resetAt: "2026-11-16T09:00:00.000Z",
+        allowancePercentOfWeekly: 50,
+        usedPercentOfWeekly: 6,
+    });
+    assert.doesNotMatch(JSON.stringify(windows), /must-not-escape/);
+});
+
+test("Claude scoped quotas preserve reported zero and never invent a missing Fable quota or share", () => {
+    assert.deepEqual(
+        claudeWindows({
+            limits: [
+                { kind: "weekly_scoped", percent: 0, scope: { model: { id: "claude-fable-5-2" } } },
+            ],
+        }),
+        [{ id: "seven_day_fable", label: "Weekly · Fable", usedPercent: 0, resetAt: null }],
+    );
+    assert.deepEqual(claudeWindows({ seven_day_fable: { utilization: 25 } }), [
+        { id: "seven_day_fable", label: "Weekly · Fable", usedPercent: 25, resetAt: null },
+    ]);
+    assert.deepEqual(
+        claudeWindows({
+            limits: [
+                {
+                    kind: "weekly_scoped",
+                    percent: null,
+                    scope: { model: { display_name: "Fable" } },
+                },
+                {
+                    kind: "weekly_scoped",
+                    percent: Infinity,
+                    scope: { model: { display_name: "Fable" } },
+                },
+                { kind: "weekly_scoped", percent: -2, scope: { model: { display_name: "Fable" } } },
+                {
+                    kind: "weekly_scoped",
+                    percent: 12,
+                    scope: { model: { display_name: "Something else" } },
+                },
+            ],
+        }),
+        [],
+    );
+});

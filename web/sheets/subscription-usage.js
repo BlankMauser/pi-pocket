@@ -33,6 +33,28 @@ export function resetLabel(value, now = Date.now()) {
     return `Resets in ${days ? `${days}d ` : ""}${hours ? `${hours}h ` : ""}${minutes % 60}m`;
 }
 
+/** The Fable cap is a slice of the shared weekly allowance, never an additional allowance. */
+function fableHelp(window) {
+    const allowance = window.allowancePercentOfWeekly;
+    const known =
+        typeof allowance === "number" &&
+        Number.isFinite(allowance) &&
+        allowance >= 0 &&
+        allowance <= 100;
+
+    return known
+        ? `Counts toward the shared weekly limit; Fable can use up to ${number(allowance)}% of it. Whichever limit is reached first applies.`
+        : "Counts toward the shared weekly limit. Whichever limit is reached first applies.";
+}
+
+const windowLabel = (account, window) =>
+    window.id === "seven_day" && account.windows.some((item) => item.id === "seven_day_fable")
+        ? "Weekly · All models"
+        : window.label;
+
+const usedLabel = (window) =>
+    `${number(window.usedPercent)}%${window.id === "seven_day_fable" ? " of Fable limit" : ""} used`;
+
 export function SubscriptionUsageSheet() {
     const [data, setData] = useState(null),
         [error, setError] = useState(null),
@@ -108,12 +130,15 @@ export function SubscriptionUsageSheet() {
             <div class="subscription-heading"><strong>${account.name}</strong><span class="muted small mono">${account.id}</span></div>
             ${account.checkedAt && html`<p class="muted small">${account.stale ? "Last known usage" : "Checked"} · ${time(account.checkedAt)}</p>`}
             ${account.message && html`<p class="muted small" role="status">${account.message}</p>`}
+            ${account.fableMessage && html`<p class="muted small" role="status">${account.fableMessage}</p>`}
             ${account.windows.map(
                 (window) => html`<div class="subscription-window" key=${window.id}>
-                <div class="subscription-heading"><span>${window.label}</span><span class="mono">${number(Math.max(0, 100 - window.usedPercent))}% left</span></div>
-                <div class="subscription-meter" role="progressbar" aria-label=${`${window.label} used`} aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.min(100, window.usedPercent)} aria-valuetext=${`${number(window.usedPercent)}% used${account.stale ? ", last known" : ""}`}><span style=${`width:${Math.min(100, window.usedPercent)}%`}></span></div>
-                <div class="subscription-heading muted small"><span>${number(window.usedPercent)}% used</span><span>${resetLabel(window.resetAt, now)}</span></div>
+                <div class="subscription-heading"><span>${windowLabel(account, window)}</span><span class="mono">${number(Math.max(0, 100 - window.usedPercent))}% left</span></div>
+                <div class="subscription-meter" role="progressbar" aria-label=${`${windowLabel(account, window)} used`} aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.min(100, window.usedPercent)} aria-valuetext=${`${usedLabel(window)}${account.stale ? ", last known" : ""}`}><span style=${`width:${Math.min(100, window.usedPercent)}%`}></span></div>
+                <div class="subscription-heading muted small"><span>${usedLabel(window)}</span><span>${resetLabel(window.resetAt, now)}</span></div>
                 ${window.resetAt && html`<div class="muted small subscription-reset">${time(window.resetAt)}</div>`}
+                ${window.id === "seven_day_fable" && html`<p class="muted small">${fableHelp(window)}</p>`}
+                ${window.id === "seven_day_fable" && typeof window.usedPercentOfWeekly === "number" && Number.isFinite(window.usedPercentOfWeekly) && window.usedPercentOfWeekly >= 0 && window.usedPercentOfWeekly <= 100 && html`<p class="muted small">Fable usage accounts for ${number(window.usedPercentOfWeekly)}% of the shared weekly limit.</p>`}
             </div>`,
             )}
         </section>`,
