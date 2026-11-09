@@ -484,6 +484,13 @@ function actionItems() {
         },
         { label: "Spend", icon: "pulse", run: () => openSheet({ type: "spend" }) },
         me?.role === "owner" && {
+            label: "Usage watchdogs",
+            detail: "automatic provider switching, status and stop",
+            keywords: "watchdog timer quota",
+            icon: "clock",
+            run: () => openSheet({ type: "usage-watchdogs" }),
+        },
+        me?.role === "owner" && {
             label: "Subscription usage",
             detail: "allowances and reset times",
             keywords: "limits quota",

@@ -252,6 +252,131 @@ const altP = () =>
         `window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", code: "KeyP", altKey: true, bubbles: true }))`,
     );
 
+test(
+    "Peek defaults to this session's working subagents, with live calls and an honest empty state",
+    real,
+    async () => {
+        await page.evaluate(`${SWITCH}.click()`);
+        await until(
+            async () =>
+                (
+                    await inPage<string>(
+                        `return JSON.stringify(document.querySelector(".peeks")?.textContent ?? "")`,
+                    )
+                ).includes("No subagents are working in this session."),
+            "the subagent empty state",
+        );
+        assert.deepEqual(await tiles(), [], "other sessions are excluded by default");
+
+        await say(app, ids.open, "start a slow helper");
+        let helper = 0;
+
+        await until(
+            async () => {
+                const shown = await tiles();
+
+                helper = shown[0]?.id ?? 0;
+
+                return (
+                    shown.length === 1 &&
+                    shown[0]?.title === "helper" &&
+                    shown[0]?.lines.includes("sleep 30") === true
+                );
+            },
+            "the open session's subagent and its live shell call",
+            20_000,
+        );
+        await until(
+            async () => (await serverPeeks())?.includes(helper) === true,
+            "the child receives live peeks",
+        );
+        assert.equal(
+            (await tiles()).some((tile) => ids.working.includes(tile.id as ConversationId)),
+            false,
+        );
+
+        const approval = app.approvals.request(
+            {
+                id: "child-peek-call",
+                conversationId: helper as ConversationId,
+                taskId: 4 as unknown as TaskId,
+                tool: "bash",
+                subject: "echo child approval",
+                reason: "test approval",
+                createdAt: Date.now(),
+            },
+            context,
+        );
+
+        try {
+            await until(
+                async () => (await tiles())[0]?.ask.includes("echo child approval") === true,
+                "the child's approval is visible",
+            );
+            assert.equal((await tiles())[0]?.status, "waiting");
+            await page.setViewport({ width: 390, height: 844, scale: 1, mobile: true });
+            await until(
+                async () => (await tiles(".peek-strip"))[0]?.title === "helper",
+                "the working child appears on phones too",
+            );
+            await until(
+                async () =>
+                    await inPage<boolean>(
+                        `return JSON.stringify(document.querySelector(".peeks") === null)`,
+                    ),
+                "the wide column has finished leaving",
+            );
+            assert.equal(
+                await inPage<boolean>(
+                    `return JSON.stringify(document.documentElement.scrollWidth <= innerWidth)`,
+                ),
+                true,
+                "the phone layout fits the viewport",
+            );
+            await page.setViewport(DESKTOP);
+        } finally {
+            app.approvals.answer("child-peek-call", { allow: false, by: "test" });
+            await approval;
+            await app.commands.abort(helper as ConversationId, owner(app));
+        }
+
+        await until(
+            async () => (await tiles()).length === 0,
+            "a stopped child leaves Peek despite its cached live call",
+        );
+        await page.setViewport({ width: 390, height: 844, scale: 1, mobile: true });
+        await until(
+            async () =>
+                (
+                    await inPage<string>(
+                        `return JSON.stringify(document.querySelector(".peek-strip-host")?.textContent ?? "")`,
+                    )
+                ).includes("No subagents are working in this session."),
+            "the mobile empty state and selector",
+        );
+        await page.setViewport(DESKTOP);
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelector(".peeks [aria-label='Peek content']") !== null)`,
+                ),
+            "the column selector returns",
+        );
+        await page.evaluate(
+            `const select = document.querySelector('.peeks [aria-label="Peek content"]'); select.value = "sessions"; select.dispatchEvent(new Event("change", { bubbles: true }));`,
+        );
+        await until(
+            async () => (await tiles()).length >= ids.working.length + 2,
+            "other sessions remain available when selected",
+        );
+        await altP();
+        await until(
+            async () => (await tiles()).length === 0,
+            "the column closes before the switch tests",
+        );
+    },
+);
+
 test("the top bar's switch turns them on, and Alt+P off and on again", real, async () => {
     await page.evaluate(`${SWITCH}.click()`);
     assert.equal(await pressed(), "true");

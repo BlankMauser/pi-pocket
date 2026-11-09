@@ -658,7 +658,7 @@ export function AppearanceSheet() {
             <//>
             <${SettingRow}
                 title="Peek tiles"
-                detail=${`Other sessions beside this one, live while on screen: working, waiting for you, done since you looked, and pinned. Also the tiles button in the top bar${touch ? "" : ", or Alt+P"}`}
+                detail=${`Working subagents beside this session, live while on screen. The Peek selector can show other sessions instead. Also the tiles button in the top bar${touch ? "" : ", or Alt+P"}`}
             >
                 <${Switch}
                     on=${p.peeks}

@@ -74,8 +74,10 @@ const DEFAULTS = {
     pip: "floating",
     /** How the session list groups: "priority" (by what needs you), "recent" (by day), or "folder". */
     group: "recent",
-    /** Other sessions' live work as peek tiles beside the session (a strip on narrow screens). Off until turned on. */
+    /** Working subagents as peek tiles beside the session (a strip on narrow screens). Off until turned on. */
     peeks: false,
+    /** Working subagents by default, or "sessions" to watch other chats. */
+    peekScope: "subagents",
     /** How fast the last answer came, in the status line under the message box. Off until turned on. */
     speed: false,
     /** Pi's current thought above the live line, and its finished thoughts open. Off until turned on. */

@@ -13106,6 +13106,36 @@ textarea.notes {
     animation: people-out var(--t-out) linear forwards;
 }
 
+.peeks-toolbar {
+    padding: 8px;
+    border-bottom: 1px solid var(--hair);
+}
+
+.peeks-toolbar label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.peeks-toolbar select {
+    flex: 1;
+    min-width: 0;
+}
+
+.peek-strip-host {
+    min-width: 0;
+    border-bottom: 1px solid var(--hair);
+}
+
+.peek-strip .peeks-empty {
+    padding: 8px;
+}
+
+.peek-strip .peeks-empty .icon,
+.peek-strip .peeks-empty .small {
+    display: none;
+}
+
 /* Turned on with nothing to show yet: what will show here. */
 .peeks-empty {
     margin: auto 0;

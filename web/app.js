@@ -573,12 +573,7 @@ function App() {
                         ? html`<${ExtensionPage} key=${`${state.page.module}:${state.page.id}`} />`
                         : inConversation
                           ? html`${prefs().sessionTabs && html`<${SessionTabs} />`}<${Topbar} />
-                    ${
-                        peeking &&
-                        tiles.length > 0 &&
-                        !peekColumn &&
-                        html`<${PeekStrip} tiles=${tiles} />`
-                    }
+                    ${peeking && !peekColumn && html`<${PeekStrip} tiles=${tiles} />`}
                     <${Transcript} key=${state.conversationId} />
                     ${
                         state.view.conversation &&

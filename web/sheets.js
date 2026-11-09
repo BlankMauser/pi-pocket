@@ -30,6 +30,7 @@ import { SchedulesSheet } from "./sheets/schedules.js";
 import { SessionSheet } from "./sheets/session.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
 import { SubscriptionUsageSheet } from "./sheets/subscription-usage.js";
+import { UsageWatchdogsSheet } from "./sheets/usage-watchdogs.js";
 import { SpendSheet } from "./sheets/spend.js";
 import { TextSheet } from "./sheets/text.js";
 import { VoiceSheet } from "./sheets/voice.js";
@@ -333,6 +334,9 @@ function sheetBody(sheet) {
             body = view.conversation
                 ? html`<${FindSheet} key=${view.conversation.id} initial=${sheet.query ?? ""} />`
                 : null;
+            break;
+        case "usage-watchdogs":
+            body = me?.role === "owner" ? html`<${UsageWatchdogsSheet} />` : null;
             break;
         case "subscription-usage":
             body = me?.role === "owner" ? html`<${SubscriptionUsageSheet} />` : null;

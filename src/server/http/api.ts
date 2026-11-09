@@ -40,6 +40,7 @@ import {
     readJson,
 } from "./io.ts";
 import { Dictation } from "../dictation.ts";
+import { UsageWatchdogs } from "../usage-watchdogs.ts";
 import { pushRoutes } from "./push-routes.ts";
 
 /** This machine's non-internal IPv4 addresses, for invite links other devices on its networks can open. */
@@ -55,6 +56,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
     const { app } = options;
     const { events, poll } = createEventStreams(app);
     const dictation = new Dictation(app);
+    const watchdogs = new UsageWatchdogs();
 
     const requireUser = (request: IncomingMessage): User => {
         const user = auth.user(request);
@@ -958,6 +960,28 @@ export function createApi(options: HttpOptions, auth: Auth) {
             await app.reloadExtension(second);
 
             return json(response, 200, await app.extensions(user));
+        }
+
+        if (first === "usage-watchdogs" && second === undefined && method === "GET") {
+            requireOwner(user);
+
+            return json(response, 200, await watchdogs.status());
+        }
+
+        if (
+            first === "usage-watchdogs" &&
+            second === "stop" &&
+            third === undefined &&
+            method === "POST"
+        ) {
+            requireOwner(user);
+            const body = await readJson<{ session?: unknown }>(request);
+
+            if (typeof body.session !== "number") {
+                throw new HttpError(400, "session must be a positive conversation ID");
+            }
+
+            return json(response, 200, await watchdogs.stop(body.session));
         }
 
         if (first === "subscription-usage" && second === undefined && method === "GET") {

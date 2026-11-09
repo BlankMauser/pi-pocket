@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, closeSheet } from "../store.js";
+import { api, closeSheet, openSheet } from "../store.js";
 import { html, Loader, Sheet } from "../ui.js";
 const number = (value) =>
     new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value);
@@ -97,6 +97,7 @@ export function SubscriptionUsageSheet() {
     const cooling = next !== undefined && Number.isFinite(next) && next > now;
 
     return html`<${Sheet} title="Subscription usage" onClose=${closeSheet}>
+        <button class="button small" onClick=${() => openSheet({ type: "usage-watchdogs" })}>Usage watchdogs</button>
         <p class="muted small">Account-wide allowances, including use from other machines. Reset times use this device’s time zone. Checks update every five minutes while this view is open.</p>
         <div class="subscription-toolbar"><button class="button small" disabled=${loading || cooling} onClick=${load}>${loading ? "Checking…" : "Refresh"}</button>${cooling && html`<span class="muted small">Next check in ${Math.max(1, Math.ceil((next - now) / 60_000))}m</span>`}</div>
         ${error && html`<p class="error-box" role="alert">${error}</p>`}

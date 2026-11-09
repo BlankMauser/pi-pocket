@@ -1,11 +1,5 @@
-// Peek tiles: other sessions' live work beside the open one, off until turned on (the top bar's tiles button, Alt+P,
-// /peek, the launcher, or Appearance). Wide screens show a column of tiles where the People and Browser panels dock
-// (when neither is open), narrower ones a strip under the top bar. Tiles are the sessions working, waiting for
-// approval, with subagents at work, finished since this browser last looked, and pinned, plus the one just left. A tile
-// lists the first few subagents at work in its session, a row each with what it does this moment, and counts the rest.
-// Only tiles on screen are live: once scrolling settles, the tab tells the server which (`POST /api/peeks`), subagent
-// rows too, and the rest keep the lines they last had. Their state marks stay current from the session list, which
-// covers every session.
+// Peek tiles show the open session's working subagents by default. Other sessions remain available through the
+// content selector. Only tiles on screen receive live peeks; the same transport serves both views.
 import { Component } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { AgentTile } from "./agent-tile.js";
@@ -98,8 +92,55 @@ const rank = (session, state, pinned) =>
 /** The last choice of tiles, and what it was made from: most renders (a streaming answer's) change none of it. */
 let chosen = { from: [], tiles: [] };
 
-/** The sessions shown as tiles now, in tile order. */
+/** Working subagents of the open session; finished agents leave immediately, even if an old peek remains. */
+export function agentPeekTiles(state = store.state) {
+    const parent = state.sessions.find((session) => session.id === openId(state));
+    const agents =
+        state.view?.conversation?.id === openId(state) ? (state.view.subagents ?? []) : [];
+    const from = [
+        openId(state),
+        parent?.cwd,
+        agents,
+        ...agents.map((agent) => state.peeks?.[agent.conversationId]),
+    ];
+
+    if (
+        from.length === agentChoice.from.length &&
+        from.every((value, index) => value === agentChoice.from[index])
+    ) {
+        return agentChoice.tiles;
+    }
+
+    const tiles = agents
+        .filter((agent) => agent.busy)
+        .map((agent) => ({
+            id: agent.conversationId,
+            title: agent.name,
+            cwd: parent?.cwd ?? "",
+            busy: true,
+            waiting: (state.peeks?.[agent.conversationId]?.approvals?.length ?? 0) > 0,
+            ...(agent.limited === undefined ? {} : { limited: agent.limited }),
+            agent: true,
+            asked: agent.asked,
+        }));
+
+    tiles.sort((a, b) => Number(b.waiting) - Number(a.waiting));
+    agentChoice = { from, tiles };
+
+    return tiles;
+}
+
+let agentChoice = { from: [], tiles: [] };
+
+/** Older browsers have no saved choice: subagents are the default for them too. */
+export const peekScope = () => (prefs().peekScope === "sessions" ? "sessions" : "subagents");
+
+/** The sessions or working subagents shown as tiles now, in tile order. */
 export function peekTiles(state = store.state) {
+    if (peekScope() === "subagents") {
+        return agentPeekTiles(state);
+    }
+
     const open = openId(state);
     const from = [state.sessions, open, state.pinned, state.peekSeen, lastLeft, seenSince()];
 
@@ -154,7 +195,7 @@ export function togglePeeks() {
     if (on && !PEEK_WIDE.matches && peekTiles().length === 0) {
         notify(
             "info",
-            "Peek tiles on: sessions show here while they work, wait for you, or finish.",
+            "Peek tiles on: this session’s working subagents show here. Choose Other sessions to watch other chats.",
         );
     }
 }
@@ -171,7 +212,7 @@ export function PeeksRailButton() {
         class=${`rail-button rail-peeks ${on ? "open" : ""}`}
         data-part="rail-button"
         data-state=${railState(on)}
-        title=${on ? "Hide peek tiles (Alt+P)" : "Peek at other sessions (Alt+P)"}
+        title=${on ? "Hide peek tiles (Alt+P)" : "Peek at working subagents (Alt+P)"}
         aria-label="Peek tiles"
         aria-pressed=${on}
         onClick=${togglePeeks}
@@ -180,9 +221,9 @@ export function PeeksRailButton() {
     </button>`;
 }
 
-/** The top bar's switch. While off, a dot says another session waits for you. */
+/** While off, a dot points to working subagents, or waiting sessions in the other-sessions view. */
 export function PeeksButton() {
-    const { server, sessions, conversationId } = store.state;
+    const { server, sessions, conversationId, view } = store.state;
 
     if (server?.peeks !== true) {
         return null;
@@ -191,15 +232,18 @@ export function PeeksButton() {
     const on = peeksOn();
     const waiting =
         !on &&
-        sessions.some(
-            (session) => session.waiting && !session.archived && session.id !== conversationId,
-        );
+        (peekScope() === "subagents"
+            ? (view.subagents ?? []).some((agent) => agent.busy)
+            : sessions.some(
+                  (session) =>
+                      session.waiting && !session.archived && session.id !== conversationId,
+              ));
 
     return html`<button
         class=${`icon-button badge-host top-toggle ${on ? "on" : ""}`}
         aria-label="Peek tiles"
         aria-pressed=${on}
-        title=${on ? "Hide peek tiles (Alt+P)" : "Peek at other sessions (Alt+P)"}
+        title=${on ? "Hide peek tiles (Alt+P)" : "Peek at working subagents (Alt+P)"}
         onClick=${togglePeeks}
     >
         <${Icon} name="tiles" size=${18} />
@@ -715,7 +759,8 @@ class PeekTile extends Component {
         const asker = agents.find(
             (agent) => agent.conversationId === approval?.conversationId,
         )?.name;
-        const lines = peek?.lines;
+        const lines =
+            peek?.lines ?? (session.asked ? [{ kind: "user", text: session.asked }] : undefined);
         // The last few lines, which the tile gives two lines of text each.
         const shown = compact ? (lines ?? []).slice(-1) : lines?.slice(-3);
 
@@ -739,7 +784,7 @@ class PeekTile extends Component {
                         html`<kbd class="session-num">${number + 1}</kbd>`
                     }
                 </span>
-                <span class="peek-cwd mono">${shortPath(session.cwd, home)}</span>
+                <span class="peek-cwd mono">${session.agent ? "subagent" : shortPath(session.cwd, home)}</span>
             </button>
             <div class="peek-lines" onClick=${open}>
                 ${
@@ -871,6 +916,39 @@ export function PeekHost({ shown, tiles, replaced }) {
         : html`<${PeekColumn} tiles=${kept} leaving=${true} />`;
 }
 
+/** The content choice is shared by the wide column and the phone strip. */
+function PeekScope() {
+    return html`<div class="peeks-toolbar">
+        <label>
+            <span class="muted small">Peek</span>
+            <select
+                aria-label="Peek content"
+                value=${peekScope()}
+                onChange=${(event) => setPrefs({ peekScope: event.currentTarget.value })}
+            >
+                <option value="subagents">Working subagents</option>
+                <option value="sessions">Other sessions</option>
+            </select>
+        </label>
+    </div>`;
+}
+
+function PeekEmpty() {
+    return html`<div class="peeks-empty">
+        <${Icon} name="tiles" size=${28} />
+        <p>${
+            peekScope() === "subagents"
+                ? "No subagents are working in this session."
+                : "Other sessions show here while they work, wait for you, or finish."
+        }</p>
+        <p class="muted small">${
+            peekScope() === "subagents"
+                ? "Subagents appear here when this agent starts them."
+                : "Pinned sessions stay here."
+        } Alt+P hides this.</p>
+    </div>`;
+}
+
 /** Wide screens: the tiles as a column beside the conversation, scrolling, with the way to calls waiting out of view. */
 function PeekColumn({ tiles, leaving = false }) {
     const list = useRef(null);
@@ -899,16 +977,10 @@ function PeekColumn({ tiles, leaving = false }) {
         aria-label="Peeks"
         inert=${leaving}
     >
+        <${PeekScope} />
         <div class="peeks-list" ref=${list}>
             ${props.map((each) => html`<${PeekTile} ...${each} />`)}
-            ${
-                props.length === 0 &&
-                html`<div class="peeks-empty">
-                    <${Icon} name="tiles" size=${28} />
-                    <p>Other sessions show here while they work, wait for you, or finish.</p>
-                    <p class="muted small">Pinned sessions stay here. Alt+P hides this.</p>
-                </div>`
-            }
+            ${props.length === 0 && html`<${PeekEmpty} />`}
         </div>
         ${jump(away.up, "▲", (ids) => ids.at(-1))}
         ${jump(away.down, "▼", (ids) => ids[0])}
@@ -921,7 +993,11 @@ export function PeekStrip({ tiles }) {
 
     useOnScreen(list);
 
-    return html`<div class="peek-strip" ref=${list} role="region" aria-label="Peeks">
-        ${tileProps(tiles, true).map((each) => html`<${PeekTile} ...${each} />`)}
-    </div>`;
+    return html`<section class="peek-strip-host" aria-label="Peeks">
+        <${PeekScope} />
+        <div class="peek-strip" ref=${list}>
+            ${tileProps(tiles, true).map((each) => html`<${PeekTile} ...${each} />`)}
+            ${tiles.length === 0 && html`<${PeekEmpty} />`}
+        </div>
+    </section>`;
 }

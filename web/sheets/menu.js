@@ -562,6 +562,7 @@ export function MenuSheet({ places = true }) {
             ${view.conversation && item("Background", () => openSheet({ type: "background" }), "what commands print as they run")}
             ${item("Spend", () => openSheet({ type: "spend" }), me?.role === "owner" ? "by person and session, limits" : "yours")}
             ${me?.role === "owner" && item("Subscription usage", () => openSheet({ type: "subscription-usage" }), "allowances and reset times")}
+            ${me?.role === "owner" && item("Usage watchdogs", () => openSheet({ type: "usage-watchdogs" }), "automatic provider switching, status and stop")}
             ${triggersOn() && me?.role !== "viewer" && item("Webhooks and watches", () => openSheet({ type: "hooks" }), "GitHub, other services")}
             ${item("Providers", () => openSheet({ type: "providers" }))}
             ${modelRefreshAvailable() && item("Refresh models", refreshModels, store.state.modelRefresh.loading ? "refreshing…" : "models.json and providers")}
