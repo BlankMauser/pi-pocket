@@ -1,0 +1,21 @@
+contrib/usage-watchdog-control.py
+  s_3472be1b2cf028::t_28a20cc010e3ef 27-32
+test/usage-watchdog-control.test.py
+  s_3472be1b2cf028::t_18a1585dd7ff09 8-9,138-148
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "816d92feae3f769b2e1bc049d979682172b15e02",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
