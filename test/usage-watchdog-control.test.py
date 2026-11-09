@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
 spec = importlib.util.spec_from_file_location('control', Path(__file__).parents[1] / 'contrib/usage-watchdog-control.py')
 control = importlib.util.module_from_spec(spec)
@@ -132,6 +134,17 @@ class ControlTests(unittest.TestCase):
             state.chmod(0o777)
             with self.assertRaises(PermissionError):
                 control.stop('93063', runner, state, os.getuid())
+
+    def test_systemd_no_matching_unit_files_is_empty_but_real_failures_propagate(self):
+        args = ['/usr/bin/systemctl', 'list-unit-files', 'usage-watchdog-*.timer']
+        with patch.object(control.subprocess, 'run', return_value=subprocess.CompletedProcess(args, 1, '', '')):
+            self.assertEqual(control.run(args), '')
+        with patch.object(control.subprocess, 'run', return_value=subprocess.CompletedProcess(args, 1, '', 'DBus failed')):
+            with self.assertRaises(subprocess.CalledProcessError):
+                control.run(args)
+        with patch.object(control.subprocess, 'run', return_value=subprocess.CompletedProcess(args, 1, '', '')):
+            with self.assertRaises(subprocess.CalledProcessError):
+                control.run(['/usr/bin/systemctl', 'disable', 'usage-watchdog-1.timer'])
 
     def test_rejects_bad_invocations_and_ids_without_running_commands(self):
         for argv in [[], ['stop'], ['status', 'extra'], ['start', '123']]:

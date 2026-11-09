@@ -24,7 +24,12 @@ def session_id(value):
 
 
 def run(args):
-    return subprocess.run(args, capture_output=True, text=True, timeout=15, check=True).stdout
+    result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+    # systemd returns 1 with no output when no unit files match the filter.
+    empty = args[1] == 'list-unit-files' and result.returncode == 1 and not result.stdout and not result.stderr
+    if not empty:
+        result.check_returncode()
+    return result.stdout
 
 
 def check_owner(info, owner):
