@@ -1,7 +1,7 @@
 /** Choices and thinking levels for a person's explicit model selection. */
 const claude = (model) => /(?:^|\/)claude-/i.test(model.id);
 
-/** Retire known pre-5.5 releases without concealing newer versions or future model names. */
+/** Retire old releases by family: Fable/Mythos 5.2 and Opus/Sonnet/Haiku 5.5 remain current. */
 export function selectableModels(models) {
     return models.filter((model) => {
         if (!claude(model)) {
@@ -10,10 +10,12 @@ export function selectableModels(models) {
 
         const version = /(?:^|\/)claude-(?:[a-z]+-)?(\d+)(?:[.-](\d+))?/i.exec(model.id);
 
+        const minimumMinor = /(?:^|\/)claude-(?:fable|mythos)-/i.test(model.id) ? 2 : 5;
+
         return (
             !version ||
             Number(version[1]) > 5 ||
-            (Number(version[1]) === 5 && Number(version[2] ?? 0) >= 5)
+            (Number(version[1]) === 5 && Number(version[2] ?? 0) >= minimumMinor)
         );
     });
 }
