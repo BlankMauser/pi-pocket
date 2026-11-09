@@ -1,0 +1,31 @@
+docs/subscription-usage.md
+  s_3472be1b2cf028::t_2384ec20dda7d7 1-25
+src/server/subscription-proxy.ts
+  s_3472be1b2cf028::t_cd3b34ae478e0b 1-248
+src/server/subscription-usage.ts
+  s_3472be1b2cf028::t_d8a0cf94767446 9-10,21,47,56,58,61-124
+test/subscription-proxy.test.ts
+  s_3472be1b2cf028::t_c7c7da8d2e662d 1-270
+test/subscription-usage-ui.test.ts
+  s_3472be1b2cf028::t_c5e7e0288b9fb6 1-275
+test/subscription-usage.test.ts
+  s_3472be1b2cf028::t_e26d60a52579ca 285-362
+web/sheets/subscription-usage.js
+  s_3472be1b2cf028::t_6db75b77118740 36-57,133,136-138,140-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a26ee12ec73cfd874a4a021787a0fbaf55f3042c",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
