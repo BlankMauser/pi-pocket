@@ -27,6 +27,17 @@ const coarsePointer = matchMedia("(pointer: coarse)").matches;
 /** Where the picker opens: above the message box's model chip (`popAnchor`). */
 const modelAnchor = () => popAnchor(".model-chip");
 
+// A closing or reopened picker still shares its session's outstanding change.
+const pendingChanges = new Set();
+const pendingListeners = new Set();
+let pickerNumber = 0;
+
+const pendingChanged = () => {
+    for (const listener of pendingListeners) {
+        listener();
+    }
+};
+
 /** Whether the server keeps a default model: one started before it did sends none, and would ignore one. */
 export const defaultsKept = () => store.state.server?.defaultModel !== undefined;
 
@@ -68,21 +79,61 @@ const matches = (model, query) => {
  * and thinking level new sessions start with instead, and stays open for both.
  */
 export function ModelPicker() {
+    const opened = useRef(null);
+    const sheet = store.state.sheet;
+
+    if (!opened.current || (sheet?.type === "model" && opened.current.sheet !== sheet)) {
+        opened.current = {
+            sheet,
+            number: ++pickerNumber,
+            conversationId: store.state.conversationId,
+            person: store.state.me?.id,
+        };
+    }
+
+    return html`<${ModelPickerMenu} key=${opened.current.number} opened=${opened.current} />`;
+}
+
+function ModelPickerMenu({ opened }) {
     const { models, server, me } = store.state;
-    const [pipId] = useState(() => store.state.sheet?.pipId);
+    const pipId = opened.sheet?.pipId;
+    const forDefault = opened.sheet?.forDefault === true;
+    const defaultKey = JSON.stringify([opened.person, "default"]);
+    const changeKey = forDefault
+        ? defaultKey
+        : JSON.stringify([opened.person, pipId ?? opened.conversationId]);
+    const [, changed] = useState(0);
+
+    useEffect(() => {
+        const listener = () => changed((value) => value + 1);
+
+        pendingListeners.add(listener);
+
+        return () => pendingListeners.delete(listener);
+    }, []);
+
+    const stillHere = () =>
+        store.state.sheet === opened.sheet &&
+        store.state.me?.id === opened.person &&
+        (forDefault ||
+            (pipId !== undefined
+                ? store.state.pip?.id === pipId
+                : store.state.conversationId === opened.conversationId &&
+                  store.state.view.conversation?.id === opened.conversationId));
     const view = pipId === undefined ? store.state.view : store.state.pipView;
     const locked =
-        pipId !== undefined &&
-        (view.conversation?.id !== pipId ||
-            view.live?.busy === true ||
-            (view.live?.compactions?.length ?? 0) > 0);
+        !stillHere() ||
+        pendingChanges.has(changeKey) ||
+        (pipId !== undefined &&
+            (view.conversation?.id !== pipId ||
+                view.live?.busy === true ||
+                (view.live?.compactions?.length ?? 0) > 0));
     const configure = (change) =>
         pipId === undefined
-            ? actions.configure(change)
+            ? api(`c/${opened.conversationId}/configure`, change)
             : api(`c/${pipId}/configure`, { ...change, pipPanel: true });
     // While the picker animates out, the store has no sheet any more.
-    const [query, setQuery] = useState(store.state.sheet?.query ?? "");
-    const [forDefault] = useState(() => store.state.sheet?.forDefault === true);
+    const [query, setQuery] = useState(opened.sheet?.query ?? "");
     const scopedModels = models.filter((model) => model.scoped);
     // Opened already searching (`/model gem`) for models only outside the scope: it starts with all of them.
     const [showAll, setShowAll] = useState(
@@ -163,13 +214,47 @@ export function ModelPicker() {
         !forDefault &&
         isDefault(agent?.model) &&
         (chosen?.thinkingLevel ?? "off") === (agent?.thinkingLevel ?? "off");
+
+    const mutate = (action, close = false, defaultChange = false) => {
+        const keys = defaultChange ? [...new Set([changeKey, defaultKey])] : [changeKey];
+
+        if (locked || !stillHere() || keys.some((key) => pendingChanges.has(key))) {
+            return;
+        }
+
+        for (const key of keys) {
+            pendingChanges.add(key);
+        }
+
+        pendingChanged();
+
+        return attempt(async () => {
+            try {
+                await action();
+
+                if (close && stillHere()) {
+                    closeSheet();
+                }
+            } finally {
+                for (const key of keys) {
+                    pendingChanges.delete(key);
+                }
+
+                pendingChanged();
+            }
+        });
+    };
+
     const setDefault = (model, thinkingLevel) =>
-        attempt(() =>
-            actions.setDefaultModel({
-                provider: model.provider,
-                modelId: model.id ?? model.modelId,
-                thinkingLevel,
-            }),
+        mutate(
+            () =>
+                actions.setDefaultModel({
+                    provider: model.provider,
+                    modelId: model.id ?? model.modelId,
+                    thinkingLevel,
+                }),
+            false,
+            true,
         );
     const providerLabel = (id) =>
         `${providerNames[id] ?? id} (${choices.filter((model) => model.provider === id).length})`;
@@ -227,7 +312,7 @@ export function ModelPicker() {
     }, [active]);
 
     const pick = (model) => {
-        if (locked) {
+        if (locked || !stillHere() || pendingChanges.has(changeKey)) {
             return;
         }
 
@@ -236,19 +321,19 @@ export function ModelPicker() {
             return isCurrent(model) ? undefined : setDefault(model, level);
         }
 
-        attempt(async () => {
-            if (!isCurrent(model)) {
-                await configure(pickerModelChange(model));
-            }
-
+        if (isCurrent(model)) {
             closeSheet();
-        });
+
+            return;
+        }
+
+        mutate(() => configure(pickerModelChange(model)), true);
     };
 
     const think = (each) =>
         forDefault
             ? setDefault(defaultModel, each)
-            : attempt(() => configure({ thinkingLevel: each }));
+            : mutate(() => configure({ thinkingLevel: each }));
 
     // Arrows and Enter move through the models, and Tab switches scoped and all, from the search box or the picker
     // itself, not from its other buttons: there Tab and Shift+Tab move the focus as anywhere else.
@@ -521,7 +606,8 @@ export function ModelPicker() {
                               chosen
                                   ? html`<button
                                         class="pop-menu-link"
-                                        onClick=${() => attempt(() => actions.setDefaultModel(null))}
+                                        disabled=${locked}
+                                        onClick=${() => mutate(() => actions.setDefaultModel(null), false, true)}
                                     >
                                         Clear owner default: use project defaults, then last picked
                                     </button>`
@@ -541,6 +627,7 @@ export function ModelPicker() {
                                       </span>`
                                     : html`<button
                                           class="pop-menu-link"
+                                          disabled=${locked || pendingChanges.has(defaultKey)}
                                           title="New sessions start with this model and thinking level"
                                           onClick=${() => setDefault(agent.model, agent.thinkingLevel ?? "off")}
                                       >
