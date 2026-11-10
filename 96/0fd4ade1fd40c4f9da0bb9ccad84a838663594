@@ -1,0 +1,22 @@
+web/sheets/model.js
+  s_3472be1b2cf028::t_2ee6363a24be2b 217,247,250-255,315,630
+  s_3472be1b2cf028::t_717706d2f61ce2 30-40,82-97,99-122,125-130,133,136,218-246,249,256-257,324,326-330,336,609-610
+test/model-picker-race.test.ts
+  s_3472be1b2cf028::t_608bf767855c20 1-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "960fd4ade1fd40c4f9da0bb9ccad84a838663594",
+  "prompts": {},
+  "sessions": {
+    "s_3472be1b2cf028": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b3b-5208-7682-9ff2-6a489a958d0f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
