@@ -1,0 +1,19 @@
+src/server/app.ts
+  s_1c803441e16f97::t_5f24032a770971 1062-1063,1065,1068
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2b0906dbda57489a87e2d90c620b0a4fcca5916a",
+  "prompts": {},
+  "sessions": {
+    "s_1c803441e16f97": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "pi-pocket-pi",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
