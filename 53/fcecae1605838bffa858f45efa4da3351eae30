@@ -1,0 +1,26 @@
+src/server/app.ts
+  h_03360edcd9e88f 49-50,57,375-379,433-442,538,822-836,973-975,1058-1061,1064,2790-2792,3291-3294,3296-3297,4496-4497
+src/server/cold-store.ts
+  h_03360edcd9e88f 1-1315
+src/server/conversation-usage.ts
+  h_03360edcd9e88f 103-109
+src/server/extensions/subagents.ts
+  h_03360edcd9e88f 1072-1077
+src/server/host.ts
+  h_03360edcd9e88f 467-468
+src/server/http/api.ts
+  h_03360edcd9e88f 1153-1202
+src/server/transcripts.ts
+  h_03360edcd9e88f 82-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "53fcecae1605838bffa858f45efa4da3351eae30",
+  "prompts": {},
+  "humans": {
+    "h_03360edcd9e88f": {
+      "author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
