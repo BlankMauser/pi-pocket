@@ -367,6 +367,64 @@ test("the cold store's settings: the key from a file or the environment, never s
     assert.throws(() => new HttpColdClient("ftp://127.0.0.1", "k"), /https/);
 });
 
+test("the HTTP client tries again what the engine or a 5xx cut off, and never a refusal of the Worker's own", async () => {
+    const answers: { status: number; body: string }[] = [];
+    let calls = 0;
+    const server = createServer((_, response) => {
+        calls++;
+        const next = answers.shift() ?? { status: 200, body: '{"rows":1,"bytes":2,"sealed":true}' };
+
+        response.writeHead(next.status, { "content-type": "application/json" });
+        response.end(next.body);
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    try {
+        const client = new HttpColdClient(
+            `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+            "k",
+        );
+        const consumerClosed = '{"code":"consumer_closed","group":"ups","message":"..."}';
+
+        // Regression: Rivet's `consumer_closed` (a 400) stopped a whole pass.
+        answers.push({ status: 400, body: consumerClosed });
+        assert.deepEqual(await client.summary("u"), { rows: 1, bytes: 2, sealed: true });
+        assert.equal(calls, 2);
+
+        // The Worker's own 404: not tried again.
+        calls = 0;
+        answers.push({ status: 404, body: '{"error":"not found"}' });
+        await assert.rejects(client.summary("u"), ColdUnavailable);
+        assert.equal(calls, 1);
+
+        // `backup failed`, three times: tried three times, then the error says why.
+        calls = 0;
+        answers.push(
+            ...Array.from({ length: 3 }, () => ({
+                status: 503,
+                body: '{"error":"backup failed: x"}',
+            })),
+        );
+        await assert.rejects(client.seal("u", 1, 2), /503: .*backup failed/);
+        assert.equal(calls, 3);
+
+        // A refused key: once.
+        calls = 0;
+        answers.push({ status: 401, body: '{"error":"unauthorized"}' });
+        await assert.rejects(client.summary("u"), /refused the key/);
+        assert.equal(calls, 1);
+        // A seal's answer with the second copy's `backup` field is accepted.
+        answers.push({
+            status: 200,
+            body: '{"rows":1,"bytes":2,"sealed":true,"backup":{"parts":1}}',
+        });
+        await client.seal("u", 1, 2);
+    } finally {
+        server.close();
+    }
+});
+
 test("a finished subagent may be archived; one that is open, at work, forked, quiet too briefly, or whose report waits may not", async () => {
     const id = await finished("elig");
 

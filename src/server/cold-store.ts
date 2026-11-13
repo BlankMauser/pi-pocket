@@ -250,13 +250,28 @@ export class HttpColdClient implements ColdClient {
         }
 
         if (!response.ok) {
+            if (response.status === 401) {
+                throw new ColdUnavailable("The cold store refused the key.", false);
+            }
+
+            // The Worker's own refusals carry `error`; an answer without it came from the engine or the network in
+            // front of it (Rivet's `consumer_closed` is a 400), and may work when tried again.
+            const own = (() => {
+                try {
+                    return typeof (JSON.parse(text) as { error?: unknown }).error === "string";
+                } catch {
+                    return false;
+                }
+            })();
+
             // Its own words, which never hold the key or a record: `backup failed: …`, `recovery failed: …`.
-            throw response.status === 401
-                ? new ColdUnavailable("The cold store refused the key.", false)
-                : new ColdUnavailable(
-                      `The cold store answered ${response.status}: ${text.slice(0, 200)}`,
-                      response.status >= 500,
-                  );
+            throw new ColdUnavailable(
+                `The cold store answered ${response.status}: ${text.slice(0, 200)}`,
+                !own ||
+                    response.status >= 500 ||
+                    response.status === 408 ||
+                    response.status === 429,
+            );
         }
 
         try {
