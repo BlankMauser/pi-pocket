@@ -30,6 +30,7 @@ import type { ConversationId, EntryId, Storage } from "@earendil-works/pi-durabl
 import {
     type ColdClient,
     ColdConflict,
+    type ColdOptions,
     type ColdRow,
     type ColdStep,
     ColdUnavailable,
@@ -44,6 +45,11 @@ class FakeCold implements ColdClient {
     units = new Map<string, { rows: Map<number, ColdRow>; sealed: boolean }>();
     down = false;
     puts = 0;
+    /** The largest request body a put would have sent, and how many puts each unit took. */
+    largestPut = 0;
+    readonly putsOf = new Map<string, number>();
+    /** Milliseconds each page waits, as a slow cold store would. */
+    pageDelay = 0;
     /** Changes a row on its way back, as a cold store that lost or garbled it would. */
     garble: ((row: ColdRow) => ColdRow) | undefined;
     readonly pageRows = 3;
@@ -74,6 +80,8 @@ class FakeCold implements ColdClient {
         }
 
         this.puts++;
+        this.putsOf.set(unit, (this.putsOf.get(unit) ?? 0) + 1);
+        this.largestPut = Math.max(this.largestPut, Buffer.byteLength(JSON.stringify({ rows })));
 
         for (const row of rows) {
             found.rows.set(row.id, { ...row });
@@ -82,6 +90,11 @@ class FakeCold implements ColdClient {
 
     async page(unit: string, after: number): Promise<{ rows: ColdRow[]; next: number | null }> {
         this.#check();
+
+        if (this.pageDelay > 0) {
+            await new Promise((resolve) => setTimeout(resolve, this.pageDelay));
+        }
+
         const all = [...this.#unit(unit).rows.values()]
             .filter((row) => row.id > after)
             .sort((a, b) => a.id - b.id);
@@ -156,7 +169,14 @@ const route: FauxResponseStep = (request) => {
             sawEarlier[subagent] = all.includes(`result of ${subagent}`);
         }
 
-        return fauxAssistantMessage([fauxText(`result of ${subagent}`)]);
+        // Answers sized against the test apps' request limit (`REQUEST_BYTES`): one record over it, or under it.
+        const pad = subagent.startsWith("big")
+            ? "x".repeat(REQUEST_BYTES + 1000)
+            : subagent.startsWith("wide")
+              ? "y".repeat(REQUEST_BYTES / 2)
+              : "";
+
+        return fauxAssistantMessage([fauxText(`result of ${subagent}${pad}`)]);
     }
 
     const spawn = /^spawn (\S+)$/.exec(text);
@@ -186,6 +206,8 @@ const route: FauxResponseStep = (request) => {
     return fauxAssistantMessage([fauxText("noted")]);
 };
 
+/** The request limit of the test apps: small, so a record can be over it. */
+const REQUEST_BYTES = 64 * 1024;
 const cold = new FakeCold();
 /** Called after each step of an archive (`ColdOptions.onStep`); tests set it to stop or hold one there. */
 let onStep: ((step: ColdStep, id: number) => void | Promise<void>) | undefined;
@@ -196,13 +218,21 @@ let parent: ConversationId;
 /** What the apps logged. */
 const logs: string[] = [];
 
-const open = (dir: string, client: ColdClient | null) =>
+const open = (dir: string, client: ColdClient | null, more: Partial<ColdOptions> = {}) =>
     openApp(scriptedModel(route), dir, undefined, undefined, {
         log: (line) => logs.push(line),
         coldStore:
             client === null
                 ? null
-                : { client, inUseMs: 0, onStep: (step, id) => onStep?.(step, id) },
+                : {
+                      client,
+                      inUseMs: 0,
+                      // Two rows a transaction: every archive and restore takes several.
+                      txRows: 2,
+                      requestBytes: REQUEST_BYTES,
+                      onStep: (step, id) => onStep?.(step, id),
+                      ...more,
+                  },
     });
 
 before(async () => {
@@ -238,6 +268,14 @@ function sql<T>(dir: string, query: string, ...params: (number | string)[]): T[]
         db.close();
     }
 }
+
+/** The unit the state of `id` names, if it has one. */
+const unitOf = (id: ConversationId, dir = dataDir) =>
+    sql<{ unit: string }>(
+        dir,
+        "SELECT unit FROM pocket_cold_units WHERE conversation_id = ?",
+        Number(id),
+    )[0]?.unit;
 
 const rowsOf = (id: ConversationId, dir = dataDir) =>
     sql<Row>(
@@ -515,7 +553,7 @@ test("an archive copies every row exactly, deletes all but the two it keeps, and
     assert.deepEqual(report.failed, []);
     assert.equal(app.cold.isCold(id), true);
 
-    const unit = cold.units.get(`conv-${id}`)!;
+    const unit = cold.units.get(unitOf(id)!)!;
 
     assert.equal(unit.sealed, true);
     // Byte for byte: id, head, commit seq, and the record's text.
@@ -604,10 +642,13 @@ test("opening an archived subagent brings back every row as it was, and it can g
 
     await archive();
     assert.equal(app.cold.isCold(id), true);
+
+    const unit = unitOf(id)!;
+
     await app.conversation(id);
     assert.equal(app.cold.isCold(id), false);
     assert.deepEqual(rowsOf(id), before, "row for row");
-    assert.equal(cold.units.has(`conv-${id}`), false, "the cold copy goes once the rows are back");
+    await until(() => !cold.units.has(unit), "its unit removed once the rows are back");
     assert.deepEqual(
         sql(dataDir, "SELECT * FROM pocket_cold_units WHERE conversation_id = ?", Number(id)),
         [],
@@ -717,6 +758,11 @@ test("a cold copy that differs from the rows here fails its archive, and deletes
         assert.ok(report.failed.some((each) => each.id === Number(id)));
         assert.equal(app.cold.isCold(id), false);
         assert.deepEqual(rowsOf(id), before);
+        assert.equal(
+            [...cold.units.keys()].some((unit) => unit.startsWith(`conv-${id}-`)),
+            false,
+            "the failed attempt's unit is removed",
+        );
         assert.deepEqual(
             sql(dataDir, "SELECT * FROM pocket_cold_units WHERE conversation_id = ?", Number(id)),
             [],
@@ -775,6 +821,21 @@ for (const step of STEPS) {
 
         await passing;
 
+        // A row of the conversation that the cold copy does not hold (as a newer Pocket might have written): a
+        // deletion the crash cut off must delete only the ids of the verified copy, never this one.
+        const stray = -Number(id);
+
+        if (step === "deleting") {
+            const writer = new DatabaseSync(join(crashed, "pocket.sqlite"));
+
+            writer
+                .prepare(
+                    "INSERT INTO entries (id, conversation_id, head, commit_seq, record) VALUES (?, ?, NULL, 1, '{}')",
+                )
+                .run(stray, Number(id));
+            writer.close();
+        }
+
         const restarted = await open(crashed, store!);
 
         try {
@@ -791,29 +852,45 @@ for (const step of STEPS) {
                 "cold only once the copy was verified",
             );
 
+            const unit = unitOf(id, crashed)!;
+
             if (!deleting) {
                 // Regression: before the copy was verified, a restart must find every row here.
                 assert.deepEqual(rowsOf(id, crashed), before);
-                assert.equal(state, undefined, "the cut-off attempt is forgotten");
+                assert.ok(
+                    ["copying", "sealed"].includes(state ?? ""),
+                    "the cut-off attempt is recorded",
+                );
+
+                // The next pass removes its unit (recorded by this database) and forgets it.
+                const report = await restarted.cold.pass({ ageMs: 0, limit: 0 });
+
+                assert.equal(report.cleaned, 1);
+                assert.equal(store!.units.has(unit), false);
+                assert.equal(unitOf(id, crashed), undefined);
 
                 return;
             }
 
-            assert.ok(
-                store!.units.get(`conv-${id}`)?.sealed,
-                "a sealed cold copy stands for the rows",
-            );
+            assert.ok(store!.units.get(unit)?.sealed, "a sealed cold copy stands for the rows");
+
+            const others = (rows: Row[]) => rows.filter((row) => row.id !== stray);
 
             if (step !== "archived") {
                 // The next pass finishes the deletion a crash cut off.
                 const report = await restarted.cold.pass({ ageMs: 0, limit: 0 });
 
                 assert.equal(report.resumed, 1);
-                assert.deepEqual(rowsOf(id, crashed), keptOf(before));
+                assert.deepEqual(others(rowsOf(id, crashed)), keptOf(before));
+            }
+
+            if (step === "deleting") {
+                // Regression: it deleted every local row up to the newest archived one, this one too.
+                assert.equal(rowsOf(id, crashed).filter((row) => row.id === stray).length, 1);
             }
 
             await restarted.conversation(id);
-            assert.deepEqual(rowsOf(id, crashed), before, "row for row after the restore");
+            assert.deepEqual(others(rowsOf(id, crashed)), before, "row for row after the restore");
             assert.equal(restarted.cold.isCold(id), false);
         } finally {
             await restarted.close();
@@ -840,7 +917,6 @@ test("Durable's reads past warm(): the newest entry and head marker answer from 
 
     await guarded.scanEntries({ conversationId: id }, 1, undefined, context);
     await guarded.findLatestHeadMarker(id, undefined, context);
-    await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(app.cold.isCold(id), true, "the two rows kept answer these");
     assert.deepEqual(
         calls,
@@ -848,9 +924,35 @@ test("Durable's reads past warm(): the newest entry and head marker answer from 
         "every call goes through unchanged",
     );
 
+    // Regression: a deeper read went on at once, on part of the rows, and Durable kept the range it built.
     await guarded.scanEntries({ conversationId: id }, 64, undefined, context);
-    await until(() => !app.cold.isCold(id), "the restore a deeper read starts");
+    assert.equal(app.cold.isCold(id), false, "restored before the read went through");
     assert.deepEqual(rowsOf(id), before);
+
+    // A commit that creates a fork of a cold conversation: restored before the commit goes on.
+    const parentOfFork = await finished("guarded-fork");
+
+    await archive();
+    assert.equal(app.cold.isCold(parentOfFork), true);
+    calls.length = 0;
+    await guarded.commit(
+        [
+            [
+                {
+                    type: "conversation",
+                    value: {
+                        id: 99_999_999 as ConversationId,
+                        parent: { conversationId: parentOfFork, at: 1 as unknown as EntryId },
+                    },
+                },
+            ],
+        ],
+        () => {},
+        context,
+    );
+    // Regression: a new fork's parent was not noticed, and the fork read the parent's missing rows.
+    assert.equal(app.cold.isCold(parentOfFork), false);
+    assert.deepEqual(calls, ["commit"]);
 });
 
 test("the owner's routes: the state, and a pass; nobody else may", async () => {
@@ -895,5 +997,284 @@ test("the owner's routes: the state, and a pass; nobody else may", async () => {
     } finally {
         server.closeAllConnections();
         server.close();
+    }
+});
+
+test("each archive has a unit of its own, and a restore removes only the unit its state names", async () => {
+    const id = await finished("units");
+    // What another Pocket server with the same conversation id would have put in the shared cold store.
+    const foreign = `conv-${id}`;
+
+    await cold.put(foreign, [{ id: 1, head: null, commit_seq: 1, record: "{}" }]);
+    await archive();
+
+    const first = unitOf(id)!;
+
+    assert.match(first, /^conv-\d+-[A-Za-z0-9_-]+$/);
+    assert.ok(first.length <= 96);
+    await app.conversation(id);
+    await until(() => !cold.units.has(first), "its own unit removed");
+    // Regression: units were `conv-<id>`, so this restore removed the other server's unit.
+    assert.ok(cold.units.has(foreign), "another server's unit stays");
+    await archive();
+
+    const second = unitOf(id)!;
+
+    assert.notEqual(second, first, "a new archive, a new unit");
+    cold.units.delete(foreign);
+});
+
+test("Durable reading a cold subagent past warm() gets every row: the read waits for the restore", async () => {
+    const id = await finished("ranged");
+    const before = rowsOf(id);
+    const whole = (await (await app.harness.conversation(id, context))!.context(context)).messages
+        .length;
+
+    await archive();
+    assert.equal(app.cold.isCold(id), true);
+
+    // Through the harness, not `PocketApp.conversation`: no `warm`.
+    const conversation = (await app.harness.conversation(id, context))!;
+    const page = await conversation.entries({}, 1000, undefined, context);
+
+    // Regression: the read went on with the two kept rows, and Durable's scheduler kept a range built from them.
+    assert.equal(page.items.length, before.length);
+    assert.equal((await conversation.context(context)).messages.length, whole);
+    assert.equal(app.cold.isCold(id), false);
+    assert.ok(logs.some((line) => line.includes(`conversation ${id} was read past warm()`)));
+});
+
+test("a fork of a cold subagent, or a read of one of its entries by id alone, restores it first", async () => {
+    const forked = await finished("forkme");
+    const before = rowsOf(forked);
+
+    await archive();
+    assert.equal(app.cold.isCold(forked), true);
+
+    // Regression: a new fork of a cold conversation went through, and read its parent's missing rows.
+    const fork = await (await app.harness.conversation(forked, context))!.fork(
+        before.at(-1)!.id as unknown as EntryId,
+        { ownership: { kind: "ownerless" } },
+        context,
+    );
+
+    assert.equal(app.cold.isCold(forked), false);
+    assert.deepEqual(rowsOf(forked), before);
+    assert.ok((await fork.context(context)).messages.length > 0);
+
+    const byId = await finished("byid");
+    const rows = rowsOf(byId);
+
+    await archive();
+
+    const gone = rows.find((row) => !keptOf(rows).includes(row))!;
+
+    // Regression: a read of an entry by its id alone was never noticed, and found nothing.
+    const entry = await app.harness.commit(
+        (tx) => tx.entry(gone.id as unknown as EntryId),
+        context,
+    );
+
+    assert.equal(Number(entry?.id), gone.id);
+    assert.equal(app.cold.isCold(byId), false);
+});
+
+test("an archive stops, deleting nothing, when a fork of the conversation appears before it deletes", async () => {
+    const id = await finished("late-fork");
+    const before = rowsOf(id);
+    const fakeFork = 9_000_000 + Number(id);
+
+    // Written behind Durable's back, as `guard` would otherwise stop the archive first: `#stillQuiet` must see it.
+    onStep = (step, which) => {
+        if (step === "verified" && which === Number(id)) {
+            const writer = new DatabaseSync(join(dataDir, "pocket.sqlite"), { timeout: 5_000 });
+
+            writer
+                .prepare("INSERT INTO conversations (id, record) VALUES (?, ?)")
+                .run(
+                    fakeFork,
+                    JSON.stringify({ id: fakeFork, parent: { conversationId: Number(id), at: 1 } }),
+                );
+            writer.close();
+        }
+    };
+
+    try {
+        await archive();
+    } finally {
+        onStep = undefined;
+
+        const writer = new DatabaseSync(join(dataDir, "pocket.sqlite"), { timeout: 5_000 });
+
+        writer.prepare("DELETE FROM conversations WHERE id = ?").run(fakeFork);
+        writer.close();
+    }
+
+    assert.equal(app.cold.isCold(id), false);
+    assert.deepEqual(rowsOf(id), before);
+    assert.ok(
+        logs.some((line) =>
+            line.includes(`conversation ${id} stays here: a conversation forks from it`),
+        ),
+    );
+});
+
+test("a record over the request limit fails its conversation alone; later passes skip it; requests stay under the limit", async () => {
+    const big = await finished("big-one");
+    const small = await finished("small-one");
+    const wide = await finished("wide-one");
+
+    await say(app, parent, "nudge wide-one");
+    await until(
+        async () =>
+            (await app.cold.pass({ dryRun: true, ageMs: 0, limit: 1000 })).selected.some(
+                (each) => each.id === Number(wide),
+            ),
+        "wide-one quiet again",
+        15_000,
+    );
+    cold.largestPut = 0;
+
+    const report = await archive();
+
+    // Regression: a `ColdUnavailable` for one large record stopped the whole pass.
+    assert.equal(report.stopped, undefined);
+    assert.match(
+        report.failed.find((each) => each.id === Number(big))?.error ?? "",
+        /request limit/,
+    );
+    assert.equal(app.cold.isCold(big), false);
+    assert.equal(app.cold.isCold(small), true);
+    assert.equal(app.cold.isCold(wide), true);
+    // Two answers of half the limit each: more than one request, none over the limit.
+    assert.ok((cold.putsOf.get(unitOf(wide)!) ?? 0) >= 2);
+    assert.ok(cold.largestPut <= REQUEST_BYTES, `a request of ${cold.largestPut} bytes`);
+
+    const again = await app.cold.pass({ dryRun: true, ageMs: 0, limit: 1000 });
+
+    assert.equal(
+        again.selected.some((each) => each.id === Number(big)),
+        false,
+    );
+    assert.ok((again.skipped["too large"] ?? 0) >= 1);
+    assert.ok((await app.cold.status(false)).tooLarge >= 1);
+});
+
+test("deletes take several transactions; one touched between them stops, and comes back whole", async () => {
+    const id = await finished("touched");
+
+    // More rows, for more than one delete transaction of two rows.
+    await say(app, id, "and one more");
+    await say(app, id, "and another");
+    await until(
+        async () =>
+            (await app.cold.pass({ dryRun: true, ageMs: 0, limit: 1000 })).selected.some(
+                (each) => each.id === Number(id),
+            ),
+        "touched quiet again",
+        15_000,
+    );
+
+    const before = rowsOf(id);
+    let batches = 0;
+
+    assert.ok(before.length - keptOf(before).length > 2);
+
+    onStep = (step, which) => {
+        if (step === "deleted-batch" && which === Number(id) && ++batches === 1) {
+            // A request for it after the first batch: `warm` stops the archive at its next transaction.
+            void app.conversation(id);
+        }
+    };
+
+    try {
+        const report = await archive();
+
+        assert.equal(
+            report.selected.some((each) => each.id === Number(id)),
+            true,
+        );
+    } finally {
+        onStep = undefined;
+    }
+
+    assert.equal(batches, 1, "it stopped after the batch it was touched in");
+    await until(() => !app.cold.isCold(id), "the restore");
+    assert.deepEqual(rowsOf(id), before);
+
+    // Untouched, the same conversation takes more than one delete transaction (two rows each here).
+    batches = 0;
+
+    onStep = (step, which) => {
+        if (step === "deleted-batch" && which === Number(id)) {
+            batches++;
+        }
+    };
+
+    try {
+        await archive();
+    } finally {
+        onStep = undefined;
+    }
+
+    assert.equal(app.cold.isCold(id), true);
+    assert.ok(batches >= 2, `${batches} delete transactions`);
+});
+
+test("the key in the environment is gone from it once read, so no child process gets it", () => {
+    const env: NodeJS.ProcessEnv = {
+        PI_POCKET_COLD_STORE_URL: "https://cold.example",
+        PI_POCKET_COLD_STORE_KEY: "secret-in-env",
+    };
+
+    assert.ok(coldStoreFromEnv(env));
+    // Regression: background commands get `...process.env`, which held the key.
+    assert.equal("PI_POCKET_COLD_STORE_KEY" in env, false);
+
+    const off: NodeJS.ProcessEnv = { PI_POCKET_COLD_STORE_KEY: "secret-in-env" };
+
+    assert.equal(coldStoreFromEnv(off), undefined);
+    assert.equal("PI_POCKET_COLD_STORE_KEY" in off, false, "gone even when the store is off");
+});
+
+test("with a time in use, a conversation just used is not taken, counted from the end of a long restore", async () => {
+    const slow = new FakeCold();
+    const dir = join(root, "cold-in-use");
+    const other = await open(dir, slow, { inUseMs: 1_000 });
+
+    try {
+        offerSubagents(other);
+
+        const from = await newSession(other);
+        const id = await finished("in-use", other, from);
+
+        // Used now: not taken.
+        await other.conversation(id);
+
+        const used = await other.cold.pass({ dryRun: true, ageMs: 0, limit: 1000 });
+
+        assert.equal(
+            used.selected.some((each) => each.id === Number(id)),
+            false,
+        );
+        assert.ok((used.skipped["used just now"] ?? 0) >= 1);
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        await other.cold.pass({ ageMs: 0, limit: 1000 });
+        assert.equal(other.cold.isCold(id), true);
+
+        // A restore that takes longer than the time in use.
+        slow.pageDelay = 1_500;
+        await other.conversation(id);
+        slow.pageDelay = 0;
+
+        // Regression: the time counted from when `warm` began, so the pass right after took it again.
+        const after = await other.cold.pass({ dryRun: true, ageMs: 0, limit: 1000 });
+
+        assert.equal(
+            after.selected.some((each) => each.id === Number(id)),
+            false,
+        );
+    } finally {
+        await other.close();
     }
 });

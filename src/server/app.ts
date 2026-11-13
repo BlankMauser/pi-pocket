@@ -439,7 +439,7 @@ export class PocketApp {
         log: (line) => this.#log(line),
         now: () => this.now(),
     });
-    readonly #coldOptions: ColdOptions | null | undefined;
+    readonly #coldOptions: ColdOptions | undefined;
     /** Pi's sessions from the terminal, which the owner can continue here. */
     readonly piSessions = new PiSessions(this);
     /** PiP, the owner's assistant: its conversation, what its tools do, and the follows that report to it. */
@@ -535,7 +535,6 @@ export class PocketApp {
 
     private constructor(options: OpenOptions) {
         this.#configureModels = options.configureModels;
-        this.#coldOptions = options.coldStore;
         this.#home = options.home ?? (process.env.HOME || homedir());
         this.now = options.now ?? Date.now;
         this.dataDir = options.dataDir;
@@ -560,6 +559,11 @@ export class PocketApp {
         this.config = new ConfigStore(options.dataDir);
         this.#lockFile = join(options.dataDir, "harness.lock");
         this.#log = options.log ?? ((line) => console.log(line));
+        // Now, before anything starts a child process: the key leaves this process's environment as it is read.
+        this.#coldOptions =
+            options.coldStore !== undefined
+                ? (options.coldStore ?? undefined)
+                : this.#coldFromEnv();
         this.cacheKeeper = new CacheKeeper({
             log: (line) => this.#log(line),
             conversationOf: (sessionId) => this.#conversationOfSession(sessionId),
@@ -819,12 +823,8 @@ export class PocketApp {
         this.#log(line);
     }
 
-    /** The cold store: as the app was opened with, else from the environment; a setting that is wrong leaves it off. */
-    #coldSettings(): ColdOptions | undefined {
-        if (this.#coldOptions !== undefined) {
-            return this.#coldOptions ?? undefined;
-        }
-
+    /** The cold store from the environment; a setting that is wrong leaves it off. */
+    #coldFromEnv(): ColdOptions | undefined {
         try {
             return coldStoreFromEnv();
         } catch (error) {
@@ -1063,7 +1063,7 @@ export class PocketApp {
         const watched = this.cold.guard(storage);
 
         this.#openingStorage = watched;
-        await this.cold.open(database, path, this.#coldSettings());
+        await this.cold.open(database, path, this.#coldOptions);
         this.harness = await Harness.open(
             watched,
             {

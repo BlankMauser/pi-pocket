@@ -8,7 +8,7 @@ Where things are in Pi Pocket, for agents working on it. [index.md](index.md) li
 
 ## Data (`~/.pi-pocket/`, or `PI_POCKET_DIR`)
 
-- `pocket.sqlite`: Pi Durable's storage: conversations, entries, tasks, and Pi Pocket's documents. With a cold store set up, also `pocket_cold_units`: which finished subagents' entries are in the cold store (`cold-store.ts`).
+- `pocket.sqlite`: Pi Durable's storage: conversations, entries, tasks, and Pi Pocket's documents. With a cold store set up, also `pocket_cold_units` (which finished subagents' entries are in the cold store, and in which unit), `pocket_cold_entries` (the ids of each verified cold copy), and `pocket_cold_skips` (conversations too large to send) (`cold-store.ts`).
 - `config.json`: people, roles, hashed tokens, settings. `push.json`: VAPID keys and push subscriptions. `provider-limits.json`: the limits that runs wait for now, kept only as a hint (a missing or damaged file means no limit is known).
 - `launcher.json`: the launcher's access choice. `serve-mount.json`: the Tailscale Serve mount the launcher made, named by port, so a later start can clear it.
 - `launcher.lock` and `harness.lock` (each with a `.identity` file): one launcher per data folder, and one server per data folder.
