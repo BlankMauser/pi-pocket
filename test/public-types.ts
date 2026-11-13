@@ -81,7 +81,8 @@ type Internal =
     | "toolNames"
     | "workers"
     | "machineActivity"
-    | "interruptSubagent";
+    | "interruptSubagent"
+    | "warmSubagent";
 
 type PublicHost = Pick<PocketHost, keyof Host>;
 

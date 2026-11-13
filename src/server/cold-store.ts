@@ -9,13 +9,22 @@
  * `pocket_cold_units` in the same file, written in the same transactions as the entries it describes, so a crash at any
  * point leaves either every local row, or a sealed and verified cold copy (`deleting`, `archived`).
  *
+ * Two rows of each archived conversation stay here, as well as in the cold copy: its newest entry and its newest head
+ * marker. Pi Durable keeps both per conversation in memory once read (`ConversationTails`), and would keep "none" until
+ * it forgets them if it read them while the rows were away; with them here, any read of them is right, cold or warm.
+ *
+ * `warm` is the choke point in front of Pocket's own paths to a conversation's entries (`PocketApp.conversation`,
+ * `room`, `transcripts`, a subagent's `send`). Every other path, Durable's own and extensions', passes `guard`, the
+ * Storage Durable is given: it never fetches and never throws, but a read beyond those two rows, or a write, of a cold
+ * conversation starts its restore (and says so in the log), and any touch stops an archive of it under way.
+ *
  * Nothing here runs inside a `Storage` read, and nothing here throws into Pi Durable: a cold store that does not
  * answer fails the request that wanted the conversation (`warm`), or the pass, and nothing else.
  */
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import type { ConversationId } from "@earendil-works/pi-durable";
-import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
+import type { ConversationId, Storage } from "@earendil-works/pi-durable";
+import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/pi-durable/storage/sqlite";
 import { describe, HttpError } from "./errors.ts";
 
 /** One `entries` row, as the cold store keeps it. `conversation_id` is the unit's. */
@@ -61,19 +70,15 @@ type Unit = {
     rows: number;
     bytes: number;
     last: number;
+    /** The UTF-8 bytes of the records deleted here so far: `bytes` less the two rows kept, once archived. */
+    freed: number;
     requests: number;
     lastPrompt: number;
 };
 
 /** A step of one conversation's archive, for tests that stop it there as a crash would. */
 export type ColdStep =
-    | "copying"
-    | "uploaded"
-    | "sealed"
-    | "verified"
-    | "deleting"
-    | "deleted-batch"
-    | "archived";
+    "copying" | "uploaded" | "sealed" | "verified" | "deleting" | "deleted-batch" | "archived";
 
 export type ColdOptions = {
     client: ColdClient;
@@ -112,7 +117,8 @@ export type PassReport = {
     skipped: Record<string, number>;
     /** The ones this pass takes (or would take): the quiet longest first, up to `limit`. */
     selected: { id: number; rows: number; bytes: number }[];
-    archived: { conversations: number; rows: number; bytes: number };
+    /** `bytes` went to the cold store; `freedBytes` of records left this file (the two rows each keeps stay). */
+    archived: { conversations: number; rows: number; bytes: number; freedBytes: number };
     /** Deletions a crash or a stop cut off, finished first. */
     resumed: number;
     failed: { id: number; error: string }[];
@@ -128,6 +134,8 @@ export type ColdStatus = {
     deleting: number;
     rows: number;
     bytes: number;
+    /** The UTF-8 bytes of records deleted here; the file shrinks by about as much only after a `VACUUM`. */
+    freedBytes: number;
     eligible?: { conversations: number; rows: number; bytes: number };
     lastPass?: { at: number; dryRun: boolean; archived: number; bytes: number; failed: number };
     lastError?: { at: number; conversationId?: number; message: string };
@@ -145,7 +153,9 @@ export function coldStoreFromEnv(
 
     const file = env.PI_POCKET_COLD_STORE_KEY_FILE?.trim();
     const key = (
-        file !== undefined && file !== "" ? readFileSync(file, "utf8") : env.PI_POCKET_COLD_STORE_KEY
+        file !== undefined && file !== ""
+            ? readFileSync(file, "utf8")
+            : env.PI_POCKET_COLD_STORE_KEY
     )?.trim();
 
     if (key === undefined || key === "") {
@@ -285,6 +295,8 @@ export class ColdStore {
     readonly #restoring = new Map<number, Promise<void>>();
     /** When `warm` last let each conversation through: an archive does not delete what was used since `IN_USE_MS`. */
     readonly #used = new Map<number, number>();
+    /** Conversations `guard` saw touched while cold, said once each in the log. */
+    readonly #seenCold = new Set<number>();
     #pass: Promise<PassReport> | undefined;
     #lastPass: ColdStatus["lastPass"];
     #lastError: ColdStatus["lastError"];
@@ -310,8 +322,10 @@ export class ColdStore {
         this.#onStep = options?.onStep;
 
         const exists =
-            (await db.get(`SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?`, TABLE)) !==
-            undefined;
+            (await db.get(
+                `SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?`,
+                TABLE,
+            )) !== undefined;
 
         if (!exists && this.#client === undefined) {
             return;
@@ -325,6 +339,7 @@ export class ColdStore {
                 bytes INTEGER NOT NULL,
                 last_entry INTEGER NOT NULL,
                 deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_bytes INTEGER NOT NULL DEFAULT 0,
                 requests INTEGER NOT NULL DEFAULT 0,
                 last_prompt INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL
@@ -339,6 +354,7 @@ export class ColdStore {
             rows: number;
             bytes: number;
             last_entry: number;
+            deleted_bytes: number;
             requests: number;
             last_prompt: number;
         }>(`SELECT * FROM ${TABLE}`)) {
@@ -347,6 +363,7 @@ export class ColdStore {
                 rows: row.rows,
                 bytes: row.bytes,
                 last: row.last_entry,
+                freed: row.deleted_bytes,
                 requests: row.requests,
                 lastPrompt: row.last_prompt,
             });
@@ -378,6 +395,15 @@ export class ColdStore {
             return undefined;
         }
 
+        if (this.#closed) {
+            return Promise.reject(
+                new HttpError(
+                    503,
+                    `Conversation ${key} is in the cold store, and the server is stopping.`,
+                ),
+            );
+        }
+
         let restoring = this.#restoring.get(key);
 
         if (restoring === undefined) {
@@ -397,6 +423,117 @@ export class ColdStore {
         return restoring;
     }
 
+    /**
+     * Durable's Storage, watched (see the top of this file): forwards every call unchanged, and only notes which
+     * conversations' entries are read or written. Never awaits, fetches, or throws for a cold conversation.
+     */
+    guard(storage: Storage): Storage {
+        const touched = (id: ConversationId, how: "tail" | "read" | "write") => {
+            try {
+                this.#touched(Number(id), how);
+            } catch {
+                // Never into Durable.
+            }
+        };
+
+        const entry = (async (...args: unknown[]) => {
+            if (args.length === 3) {
+                touched(args[0] as ConversationId, "read");
+            }
+
+            return (storage.entry as (...values: unknown[]) => unknown)(...args);
+        }) as Storage["entry"];
+        const guarded: Storage = {
+            commit: (batches, receive, context) => {
+                for (const batch of batches) {
+                    for (const write of batch) {
+                        if (
+                            write.type === "entry" ||
+                            write.type === "submission" ||
+                            write.type === "task"
+                        ) {
+                            touched(write.value.conversationId, "write");
+                        }
+                    }
+                }
+
+                return storage.commit(batches, receive, context);
+            },
+            mintId: () => storage.mintId(),
+            conversation: (id, context) => storage.conversation(id, context),
+            scanConversations: (query, limit, cursor, context) =>
+                storage.scanConversations(query, limit, cursor, context),
+            entry,
+            findLatestHeadMarker: (conversationId, atOrBefore, context) => {
+                // The newest marker is one of the two rows kept here.
+                touched(conversationId, atOrBefore === undefined ? "tail" : "read");
+
+                return storage.findLatestHeadMarker(conversationId, atOrBefore, context);
+            },
+            scanEntries: (query, limit, cursor, context) => {
+                // The newest entry alone (`latestEntryId`) is the other.
+                const tail =
+                    limit <= 1 &&
+                    cursor === undefined &&
+                    query.maxEntryId === undefined &&
+                    (query.order ?? "descending") === "descending";
+
+                touched(query.conversationId, tail ? "tail" : "read");
+
+                return storage.scanEntries(query, limit, cursor, context);
+            },
+            task: (id, context) => storage.task(id, context),
+            scanTasks: (query, limit, cursor, context) =>
+                storage.scanTasks(query, limit, cursor, context),
+            submission: (id, context) => storage.submission(id, context),
+            scanSubmissions: (query, limit, cursor, context) =>
+                storage.scanSubmissions(query, limit, cursor, context),
+            submissionByRequest: (conversationId, requestId, context) =>
+                storage.submissionByRequest(conversationId, requestId, context),
+            findDocument: (address, at, context) => storage.findDocument(address, at, context),
+            document: (id, at, context) => storage.document(id, at, context),
+            scanDocuments: (query, limit, cursor, context) =>
+                storage.scanDocuments(query, limit, cursor, context),
+            close: (context) => storage.close(context),
+        };
+
+        if (storage.publishing !== undefined) {
+            guarded.publishing = (publish, context) => storage.publishing!(publish, context);
+        }
+
+        return guarded;
+    }
+
+    /** What `guard` saw: an archive of the conversation under way stops; a cold one past its kept rows comes back. */
+    #touched(id: number, how: "tail" | "read" | "write"): void {
+        if (how === "tail") {
+            return;
+        }
+
+        const archiving = this.#archiving.get(id);
+
+        if (archiving !== undefined) {
+            this.#used.set(id, Date.now());
+            archiving.stop = true;
+        }
+
+        if (!this.#units.has(id) || this.#restoring.has(id) || this.#closed) {
+            return;
+        }
+
+        if (!this.#seenCold.has(id)) {
+            this.#seenCold.add(id);
+            this.#host.log(
+                `Cold store: conversation ${id} was ${how === "write" ? "written" : "read"} past warm() while cold; restoring it.`,
+            );
+        }
+
+        // Not awaited: Durable's call goes on as it is, and the rows are back for the next.
+        void Promise.resolve()
+            .then(() => this.warm(id as ConversationId))
+            .catch(() => {});
+    }
+
     /** The request count and newest prompt size of an archived conversation, as they were when it was archived. */
     usageOf(id: ConversationId): { requests: number; lastPrompt: number } | undefined {
         const unit = this.#units.get(Number(id));
@@ -409,11 +546,13 @@ export class ColdStore {
     async status(withEligible = true): Promise<ColdStatus> {
         let rows = 0;
         let bytes = 0;
+        let freedBytes = 0;
         let archived = 0;
 
         for (const unit of this.#units.values()) {
             rows += unit.rows;
             bytes += unit.bytes;
+            freedBytes += unit.freed;
 
             if (unit.state === "archived") {
                 archived++;
@@ -427,6 +566,7 @@ export class ColdStore {
             deleting: this.#units.size - archived,
             rows,
             bytes,
+            freedBytes,
             ...(this.#lastPass === undefined ? {} : { lastPass: this.#lastPass }),
             ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }),
         };
@@ -448,7 +588,9 @@ export class ColdStore {
      * Archive up to `limit` eligible subagents, the quiet longest first, one at a time; or (`dryRun`) only say which.
      * One pass at a time: a second one while one runs is refused.
      */
-    async pass(options: { limit?: number; dryRun?: boolean; ageMs?: number } = {}): Promise<PassReport> {
+    async pass(
+        options: { limit?: number; dryRun?: boolean; ageMs?: number } = {},
+    ): Promise<PassReport> {
         if (this.#client === undefined || this.#reader === undefined) {
             throw new HttpError(409, "No cold store is set up (PI_POCKET_COLD_STORE_URL).");
         }
@@ -496,17 +638,26 @@ export class ColdStore {
             },
             skipped,
             selected: selected.map(({ id, rows, bytes }) => ({ id, rows, bytes })),
-            archived: { conversations: 0, rows: 0, bytes: 0 },
+            archived: { conversations: 0, rows: 0, bytes: 0, freedBytes: 0 },
             resumed: 0,
             failed: [],
         };
+
+        // What `warm` let through long enough ago no longer counts as in use.
+        for (const [id, at] of this.#used) {
+            if (Date.now() - at > IN_USE_MS) {
+                this.#used.delete(id);
+            }
+        }
 
         if (!dryRun) {
             try {
                 // Deletions cut off by a crash or a stop first: their conversations are cold until finished or restored.
                 for (const [id, unit] of [...this.#units]) {
                     if (unit.state === "deleting" && !this.#closed) {
-                        await this.#exclusive(id, (archiving) => this.#finishDeleting(id, archiving));
+                        await this.#exclusive(id, (archiving) =>
+                            this.#finishDeleting(id, archiving),
+                        );
                         report.resumed++;
                     }
                 }
@@ -526,6 +677,7 @@ export class ColdStore {
                             report.archived.conversations++;
                             report.archived.rows += done.rows;
                             report.archived.bytes += done.bytes;
+                            report.archived.freedBytes += done.freed;
                         }
                     } catch (error) {
                         if (error instanceof ColdUnavailable) {
@@ -589,9 +741,11 @@ export class ColdStore {
     ): Promise<{ candidates: ColdCandidate[]; skipped: Record<string, number> }> {
         const reader = this.#reader!;
         const skipped: Record<string, number> = {};
+
         const skip = (why: string) => {
             skipped[why] = (skipped[why] ?? 0) + 1;
         };
+
         const ids = (sql: string, ...params: string[]) =>
             new Set(
                 (reader.prepare(sql).all(...params) as { id: number | null }[]).flatMap((row) =>
@@ -630,6 +784,7 @@ export class ColdStore {
                 WHERE conversation_id = ?`,
         );
         const docs = new Map<number, SubagentsLike | undefined>();
+
         const doc = async (id: number) => {
             if (!docs.has(id)) {
                 docs.set(id, await this.#host.subagents(id as ConversationId));
@@ -637,6 +792,7 @@ export class ColdStore {
 
             return docs.get(id);
         };
+
         const now = this.#host.now();
         const candidates: ColdCandidate[] = [];
 
@@ -801,7 +957,7 @@ export class ColdStore {
     async #archive(
         id: number,
         archiving: Archiving,
-    ): Promise<{ rows: number; bytes: number } | undefined> {
+    ): Promise<{ rows: number; bytes: number; freed: number } | undefined> {
         const db = this.#db!;
         const reader = this.#reader!;
         const client = this.#client!;
@@ -827,7 +983,10 @@ export class ColdStore {
         );
 
         const forget = async () => {
-            await db.run(`DELETE FROM ${TABLE} WHERE conversation_id = ? AND state IN ('copying', 'sealed')`, id);
+            await db.run(
+                `DELETE FROM ${TABLE} WHERE conversation_id = ? AND state IN ('copying', 'sealed')`,
+                id,
+            );
         };
 
         try {
@@ -857,7 +1016,9 @@ export class ColdStore {
                 await client.seal(unit, size.rows, size.bytes);
             } catch (error) {
                 throw error instanceof ColdConflict
-                    ? new ColdMismatch(`The cold copy of conversation ${id} has other counts: ${error.message}`)
+                    ? new ColdMismatch(
+                          `The cold copy of conversation ${id} has other counts: ${error.message}`,
+                      )
                     : error;
             }
 
@@ -900,23 +1061,34 @@ export class ColdStore {
                 return undefined;
             }
 
-            this.#units.set(id, {
+            const cold: Unit = {
                 state: "deleting",
                 rows: size.rows,
                 bytes: size.bytes,
                 last: size.last,
+                freed: 0,
                 requests,
                 lastPrompt,
-            });
-            await this.#step("deleting", id);
-            await this.#delete(id, sizes, archiving);
+            };
 
-            return this.#units.get(id)?.state === "archived"
-                ? { rows: size.rows, bytes: size.bytes }
+            this.#units.set(id, cold);
+            await this.#step("deleting", id);
+
+            const keep = await this.#kept(db, id, size.last);
+
+            await this.#delete(
+                id,
+                sizes.filter(([row]) => !keep.has(row)),
+                archiving,
+            );
+
+            return this.#units.get(id) === cold && cold.state === "archived"
+                ? { rows: size.rows, bytes: size.bytes, freed: cold.freed }
                 : undefined;
         } catch (error) {
             // Before `deleting`, every row is still here: forget the attempt. After it, the state row stays.
             await forget().catch(() => {});
+
             throw error;
         }
     }
@@ -941,6 +1113,7 @@ export class ColdStore {
         let batch: ColdRow[] = [];
         let batchBytes = 0;
         let after = 0;
+
         const flush = async () => {
             if (batch.length > 0) {
                 await this.#client!.put(unitOf(id), batch);
@@ -989,7 +1162,9 @@ export class ColdStore {
 
                                 const used = message.usage;
                                 const prompt =
-                                    (used?.input ?? 0) + (used?.cacheRead ?? 0) + (used?.cacheWrite ?? 0);
+                                    (used?.input ?? 0) +
+                                    (used?.cacheRead ?? 0) +
+                                    (used?.cacheWrite ?? 0);
 
                                 if (prompt > 0) {
                                     lastPrompt = prompt;
@@ -1019,7 +1194,9 @@ export class ColdStore {
         const summary = await client.summary(unit);
 
         if (!summary.sealed || summary.rows !== rows) {
-            throw new ColdMismatch(`The cold copy of conversation ${id} is not sealed with ${rows} rows.`);
+            throw new ColdMismatch(
+                `The cold copy of conversation ${id} is not sealed with ${rows} rows.`,
+            );
         }
 
         const local = this.#reader!.prepare(
@@ -1066,14 +1243,41 @@ export class ColdStore {
 
         // Nothing local past the last cold row either, up to `last`.
         if (seen !== rows || local.all(id, after, last, 1).length > 0) {
-            throw new ColdMismatch(`The cold copy of conversation ${id} has ${seen} of its ${rows} rows.`);
+            throw new ColdMismatch(
+                `The cold copy of conversation ${id} has ${seen} of its ${rows} rows.`,
+            );
         }
 
         return true;
     }
 
+    /**
+     * The rows of a conversation that stay here when it is archived: its newest entry and its newest head marker, the
+     * two Durable keeps in memory once read (see the top of this file). Never deleted, so the same before, during and
+     * after a deletion, and after a crash.
+     */
+    async #kept(executor: SqliteExecutor, id: number, last: number): Promise<Set<number>> {
+        const row = await executor.get<{ newest: number | null; marker: number | null }>(
+            `SELECT
+                (SELECT max(id) FROM entries WHERE conversation_id = ? AND id <= ?) AS newest,
+                (SELECT max(id) FROM entries WHERE conversation_id = ? AND id <= ? AND head IS NOT NULL) AS marker`,
+            id,
+            last,
+            id,
+            last,
+        );
+
+        return new Set(
+            [row?.newest, row?.marker].flatMap((each) => (each == null ? [] : [Number(each)])),
+        );
+    }
+
     /** Delete the verified rows here, a small transaction at a time; each one counts what it deleted in the state. */
-    async #delete(id: number, sizes: readonly [number, number][], archiving: Archiving): Promise<void> {
+    async #delete(
+        id: number,
+        sizes: readonly [number, number][],
+        archiving: Archiving,
+    ): Promise<void> {
         const db = this.#db!;
         const unit = this.#units.get(id)!;
         let from = 0;
@@ -1082,7 +1286,11 @@ export class ColdStore {
             let to = from;
             let bytes = 0;
 
-            while (to < sizes.length && to - from < TX_ROWS && (to === from || bytes + sizes[to]![1] <= TX_BYTES)) {
+            while (
+                to < sizes.length &&
+                to - from < TX_ROWS &&
+                (to === from || bytes + sizes[to]![1] <= TX_BYTES)
+            ) {
                 bytes += sizes[to]![1];
                 to++;
             }
@@ -1110,8 +1318,10 @@ export class ColdStore {
                 }
 
                 await tx.run(
-                    `UPDATE ${TABLE} SET deleted = deleted + ?, updated_at = ? WHERE conversation_id = ?`,
+                    `UPDATE ${TABLE} SET deleted = deleted + ?, deleted_bytes = deleted_bytes + ?, updated_at = ?
+                        WHERE conversation_id = ?`,
                     deleted,
+                    bytes,
                     this.#host.now(),
                     id,
                 );
@@ -1119,10 +1329,16 @@ export class ColdStore {
                 return undefined;
             });
 
+            if (why === undefined) {
+                unit.freed += bytes;
+            }
+
             if (why !== undefined) {
                 // Stopped by `warm`, which restores it next; or something started there, which no path should allow.
                 if (why !== "stopped") {
-                    this.#host.log(`Cold store: conversation ${id} came back while archived: ${why}.`);
+                    this.#host.log(
+                        `Cold store: conversation ${id} came back while archived: ${why}.`,
+                    );
                     await this.#restore(id);
                 }
 
@@ -1135,14 +1351,17 @@ export class ColdStore {
         }
 
         await db.transaction(async (tx) => {
+            const keep = await this.#kept(tx, id, unit.last);
             const left = await tx.get<{ rows: number }>(
                 `SELECT count(*) AS rows FROM entries WHERE conversation_id = ? AND id <= ?`,
                 id,
                 unit.last,
             );
 
-            if (left?.rows !== 0) {
-                throw new ColdMismatch(`Conversation ${id} still has ${left?.rows} rows here.`);
+            if (left?.rows !== keep.size) {
+                throw new ColdMismatch(
+                    `Conversation ${id} still has ${left?.rows} rows here, not the ${keep.size} it keeps.`,
+                );
             }
 
             await tx.run(
@@ -1164,15 +1383,16 @@ export class ColdStore {
             return;
         }
 
-        const ids = this.#reader!
-            .prepare(
-                `SELECT id, octet_length(record) AS bytes FROM entries WHERE conversation_id = ? AND id <= ? ORDER BY id`,
-            )
-            .all(id, unit.last) as { id: number; bytes: number }[];
+        const keep = await this.#kept(this.#db!, id, unit.last);
+        const ids = this.#reader!.prepare(
+            `SELECT id, octet_length(record) AS bytes FROM entries WHERE conversation_id = ? AND id <= ? ORDER BY id`,
+        ).all(id, unit.last) as { id: number; bytes: number }[];
 
         await this.#delete(
             id,
-            ids.map((row) => [row.id, row.bytes]),
+            ids.flatMap((row) =>
+                keep.has(row.id) ? [] : [[row.id, row.bytes] as [number, number]],
+            ),
             archiving,
         );
     }
@@ -1220,11 +1440,13 @@ export class ColdStore {
                 const entry = JSON.parse(row.record) as { id?: unknown; conversationId?: unknown };
 
                 if (Number(entry.id) !== row.id || Number(entry.conversationId) !== id) {
-                    throw new ColdMismatch(`The cold copy of conversation ${id} holds a row of another.`);
+                    throw new ColdMismatch(
+                        `The cold copy of conversation ${id} holds a row of another.`,
+                    );
                 }
             }
 
-            for (let from = 0; from < page.rows.length; ) {
+            for (let from = 0; from < page.rows.length;) {
                 let to = from;
                 let bytes = 0;
 
@@ -1257,7 +1479,11 @@ export class ColdStore {
                                 row.id,
                             );
 
-                            if (here === undefined || here.conversation_id !== id || !sameRow(here, row)) {
+                            if (
+                                here === undefined ||
+                                here.conversation_id !== id ||
+                                !sameRow(here, row)
+                            ) {
                                 throw new ColdMismatch(
                                     `Entry ${row.id} of conversation ${id} differs from its cold copy.`,
                                 );
@@ -1295,10 +1521,13 @@ export class ColdStore {
             await tx.run(`DELETE FROM ${TABLE} WHERE conversation_id = ?`, id);
         });
         this.#units.delete(id);
+        this.#seenCold.delete(id);
         this.#host.log(`Cold store: conversation ${id} is back (${unit.rows} entries).`);
         // The local rows are whole again: the cold copy goes (the next archive would start it again anyway).
         await client.remove(unitOf(id)).catch((error: unknown) => {
-            this.#host.log(`Cold store: the copy of conversation ${id} stays there: ${describe(error)}`);
+            this.#host.log(
+                `Cold store: the copy of conversation ${id} stays there: ${describe(error)}`,
+            );
         });
     }
 

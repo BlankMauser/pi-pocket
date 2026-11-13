@@ -1063,7 +1063,8 @@ export class PocketApp {
         this.#openingStorage = storage;
         await this.cold.open(database, path, this.#coldSettings());
         this.harness = await Harness.open(
-            storage,
+            // Watched by the cold store: a path past `cold.warm` to a cold conversation's entries brings them back.
+            this.cold.guard(storage),
             {
                 models: this.models,
                 registry,

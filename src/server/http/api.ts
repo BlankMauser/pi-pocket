@@ -1161,7 +1161,12 @@ export function createApi(options: HttpOptions, auth: Auth) {
             );
         }
 
-        if (first === "cold-store" && second === "pass" && third === undefined && method === "POST") {
+        if (
+            first === "cold-store" &&
+            second === "pass" &&
+            third === undefined &&
+            method === "POST"
+        ) {
             requireOwner(user);
             const body = await readJson<{ limit?: unknown; dryRun?: unknown; ageHours?: unknown }>(
                 request,
@@ -1176,12 +1181,18 @@ export function createApi(options: HttpOptions, auth: Auth) {
                     return undefined;
                 }
 
-                if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max) {
+                if (
+                    typeof value !== "number" ||
+                    !Number.isFinite(value) ||
+                    value < 0 ||
+                    value > max
+                ) {
                     throw new HttpError(400, `${name} must be a number from 0 to ${max}`);
                 }
 
                 return value;
             };
+
             const limit = number(body.limit, "limit", 100_000);
             const ageHours = number(body.ageHours, "ageHours", 100_000);
 
