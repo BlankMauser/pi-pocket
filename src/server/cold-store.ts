@@ -84,6 +84,8 @@ export type ColdOptions = {
     client: ColdClient;
     /** How long a subagent must have been quiet before a pass may archive it. Default 24 hours. */
     ageMs?: number;
+    /** How long after `warm` let a conversation through it counts as in use (`IN_USE_MS`); tests shorten it. */
+    inUseMs?: number;
     /** Tests: called after each step; a throw there stops the archive as a crash would. */
     onStep?: (step: ColdStep, id: number) => void | Promise<void>;
 };
@@ -288,6 +290,7 @@ export class ColdStore {
     #reader: DatabaseSync | undefined;
     #client: ColdClient | undefined;
     #ageMs = DAY;
+    #inUseMs = IN_USE_MS;
     #onStep: ColdOptions["onStep"];
     /** Conversations whose rows are (or may partly be) only in the cold store: `deleting` and `archived`. */
     readonly #units = new Map<number, Unit>();
@@ -319,6 +322,7 @@ export class ColdStore {
         this.#db = db;
         this.#client = options?.client;
         this.#ageMs = options?.ageMs ?? DAY;
+        this.#inUseMs = options?.inUseMs ?? IN_USE_MS;
         this.#onStep = options?.onStep;
 
         const exists =
@@ -645,7 +649,7 @@ export class ColdStore {
 
         // What `warm` let through long enough ago no longer counts as in use.
         for (const [id, at] of this.#used) {
-            if (Date.now() - at > IN_USE_MS) {
+            if (Date.now() - at > this.#inUseMs) {
                 this.#used.delete(id);
             }
         }
@@ -817,6 +821,11 @@ export class ColdStore {
                 continue;
             }
 
+            if (Date.now() - (this.#used.get(id) ?? -Infinity) < this.#inUseMs) {
+                skip("used just now");
+                continue;
+            }
+
             if (this.#host.isBusy(conversation) || working.has(id)) {
                 skip("working");
                 continue;
@@ -895,7 +904,7 @@ export class ColdStore {
             return "stopped";
         }
 
-        if ((this.#used.get(id) ?? 0) > archiving.since - IN_USE_MS) {
+        if ((this.#used.get(id) ?? 0) > archiving.since - this.#inUseMs) {
             return "it was used";
         }
 
