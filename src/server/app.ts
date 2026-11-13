@@ -826,7 +826,16 @@ export class PocketApp {
     /** The cold store from the environment; a setting that is wrong leaves it off. */
     #coldFromEnv(): ColdOptions | undefined {
         try {
-            return coldStoreFromEnv();
+            const settings = coldStoreFromEnv();
+
+            if (settings?.keyFrom === "environment") {
+                // Never the key itself.
+                this.#log(
+                    "Cold store: its key came from PI_POCKET_COLD_STORE_KEY. It is out of this process's environment now, but stays readable in /proc/<pid>/environ for as long as the server runs: use PI_POCKET_COLD_STORE_KEY_FILE.",
+                );
+            }
+
+            return settings;
         } catch (error) {
             this.#log(`The cold store is off: ${describe(error)}`);
 

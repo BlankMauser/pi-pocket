@@ -83,6 +83,7 @@ export class ColdTooLarge extends Error {
 const TABLE = "pocket_cold_units";
 const ENTRIES = "pocket_cold_entries";
 const SKIPS = "pocket_cold_skips";
+const RELEASED = "pocket_cold_released";
 /** A request body stays under this, well below the cold store's limit of about 8 MB. */
 const PUT_BYTES = 6 << 20;
 /** Each transaction that deletes or restores rows writes at most this many, and at most `TX_BYTES` of records. */
@@ -123,6 +124,8 @@ export type ColdOptions = {
     txRows?: number;
     /** The largest request body to send (`PUT_BYTES`); a single record over it fails its conversation alone. */
     requestBytes?: number;
+    /** How long, in all, `guard` waits for a restore before a call goes on without the rows (`GUARD_RESTORE_MS`). */
+    guardRestoreMs?: number;
     /** Tests: called after each step; a throw there stops the archive as a crash would. */
     onStep?: (step: ColdStep, id: number) => void | Promise<void>;
 };
@@ -183,6 +186,8 @@ export type ColdStatus = {
     freedBytes: number;
     /** Conversations passes skip, as a record of theirs is over the request limit (`pocket_cold_skips`). */
     tooLarge: number;
+    /** Conversations that stay cold until the server restarts (Durable read them without their rows). */
+    held: number;
     /** Without bytes: a dry run measures them. */
     eligible?: { conversations: number; rows: number };
     lastPass?: { at: number; dryRun: boolean; archived: number; bytes: number; failed: number };
@@ -197,7 +202,7 @@ export type ColdStatus = {
  */
 export function coldStoreFromEnv(
     env: NodeJS.ProcessEnv = process.env,
-): { client: ColdClient; ageMs: number } | undefined {
+): { client: ColdClient; ageMs: number; keyFrom: "file" | "environment" } | undefined {
     const url = env.PI_POCKET_COLD_STORE_URL?.trim();
 
     if (url === undefined || url === "") {
@@ -225,7 +230,11 @@ export function coldStoreFromEnv(
         throw new Error("PI_POCKET_COLD_STORE_AGE_HOURS must be a number of hours, 0 or more.");
     }
 
-    return { client: new HttpColdClient(url, key), ageMs: hours * 60 * 60 * 1000 };
+    return {
+        client: new HttpColdClient(url, key),
+        ageMs: hours * 60 * 60 * 1000,
+        keyFrom: file !== undefined && file !== "" ? "file" : "environment",
+    };
 }
 
 /** The cold store over HTTP, with a bearer key. Only https, or http to this machine (a local Worker). */
@@ -383,6 +392,8 @@ type Archiving = { stop: boolean; done: Promise<void>; since: number };
 const IN_USE_MS = 2 * 60 * 1000;
 /** How long `close` waits for a pass or a restore before it closes anyway (each stops at its next step). */
 const CLOSE_MS = 15_000;
+/** How long, in all, a guarded call waits for a restore before it goes on without the rows (`#hold`). */
+const GUARD_RESTORE_MS = 5_000;
 
 export class ColdStore {
     readonly #host: ColdHost;
@@ -405,6 +416,11 @@ export class ColdStore {
     readonly #restoring = new Map<number, Promise<void>>();
     /** When `warm` last let each conversation through: an archive does not delete what was used since `IN_USE_MS`. */
     readonly #used = new Map<number, number>();
+    /** Conversations Durable read or wrote without their rows: cold until the server restarts (`#hold`). */
+    readonly #held = new Set<number>();
+    #guardRestoreMs = GUARD_RESTORE_MS;
+    /** The newest conversation id when a pass last looked for forks: `#stillQuiet` looks only past it. */
+    #forksSeenTo = 0;
     /** Conversations `guard` saw touched while cold, said once each in the log. */
     readonly #seenCold = new Set<number>();
     /** Each conversation's fork parent (`ConversationRecord.parent`), or null, as `guard` looked it up. */
@@ -434,6 +450,7 @@ export class ColdStore {
         this.#inUseMs = options?.inUseMs ?? IN_USE_MS;
         this.#txRows = Math.max(1, options?.txRows ?? TX_ROWS);
         this.#requestBytes = options?.requestBytes ?? PUT_BYTES;
+        this.#guardRestoreMs = options?.guardRestoreMs ?? GUARD_RESTORE_MS;
         this.#onStep = options?.onStep;
 
         const exists =
@@ -475,6 +492,15 @@ export class ColdStore {
             last_entry INTEGER NOT NULL,
             limit_bytes INTEGER NOT NULL,
             reason TEXT NOT NULL,
+            at INTEGER NOT NULL
+        ) STRICT`);
+
+        // Units this database stopped using (a restore, an attempt that deleted nothing): `removed` once the Worker's copy
+        // is gone. Their Tigris copies stay until an operator purges them, from this list.
+        await db.exec(`CREATE TABLE IF NOT EXISTS ${RELEASED} (
+            unit TEXT PRIMARY KEY,
+            conversation_id INTEGER NOT NULL,
+            removed INTEGER NOT NULL CHECK (removed IN (0, 1)),
             at INTEGER NOT NULL
         ) STRICT`);
 
@@ -537,6 +563,15 @@ export class ColdStore {
                 new HttpError(
                     503,
                     `Conversation ${key} is in the cold store, and the server is stopping.`,
+                ),
+            );
+        }
+
+        if (this.#held.has(key)) {
+            return Promise.reject(
+                new HttpError(
+                    503,
+                    `Conversation ${key} is in the cold store, and comes back only after the server restarts (it was read without its rows while the cold store did not answer).`,
                 ),
             );
         }
@@ -704,6 +739,9 @@ export class ColdStore {
                 return;
             }
 
+            // Durable's line (every conversation's commits and many reads) waits here: never longer than this, in all.
+            const deadline = Date.now() + this.#guardRestoreMs;
+
             for (
                 let current: number | null = id, depth = 0;
                 current !== null && depth < 32;
@@ -714,11 +752,11 @@ export class ColdStore {
                 if (archiving !== undefined) {
                     this.#used.set(current, Date.now());
                     archiving.stop = true;
-                    // Stopped: it leaves the rows whole, or cold and restored just below.
-                    await archiving.done.catch(() => {});
+                    // Stopped at its next step: it leaves the rows whole, or cold and restored just below.
+                    await this.#within(archiving.done, deadline);
                 }
 
-                if (this.#units.has(current) && !this.#closed) {
+                if (this.#units.has(current) && !this.#closed && !this.#held.has(current)) {
                     if (!this.#seenCold.has(current)) {
                         this.#seenCold.add(current);
                         this.#host.log(
@@ -726,7 +764,13 @@ export class ColdStore {
                         );
                     }
 
-                    await this.warm(current as ConversationId)?.catch(() => {});
+                    const restoring = this.warm(current as ConversationId);
+                    const back =
+                        restoring === undefined || (await this.#within(restoring, deadline));
+
+                    if (!back && this.#units.has(current)) {
+                        this.#hold(current);
+                    }
                 }
 
                 current = this.#forkParentOf(current);
@@ -734,6 +778,44 @@ export class ColdStore {
         } catch {
             // Never into Durable.
         }
+    }
+
+    /** Whether `work` settled well before `deadline`; false when it failed, or is still going then. */
+    async #within(work: Promise<unknown>, deadline: number): Promise<boolean> {
+        let timer: NodeJS.Timeout | undefined;
+
+        try {
+            return await Promise.race([
+                work.then(
+                    () => true,
+                    () => false,
+                ),
+                new Promise<boolean>((resolve) => {
+                    timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()));
+                }),
+            ]);
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    /**
+     * A guarded call went on without the rows of `id` (its restore failed, or took longer than `guardRestoreMs`): Durable
+     * may now keep a context range built from the rows that are here (the two kept rows), and nothing outside Durable can
+     * drop it. Restoring the rows in this process would leave Durable using that range with the rows back, so `id` stays
+     * cold until the server restarts (a restart drops every range): `warm` refuses it with a 503, `guard` makes no
+     * request for it, a restore of it under way stops before its next transaction, and passes leave it alone.
+     */
+    #hold(id: number): void {
+        if (this.#held.has(id)) {
+            return;
+        }
+
+        this.#held.add(id);
+        this.#noteError(
+            `Durable read or wrote conversation ${id} without warm(), and the cold store did not bring it back within ${this.#guardRestoreMs} ms: it stays cold until the server restarts.`,
+            id,
+        );
     }
 
     /** The conversation `id` forks from, or null; read once from storage and kept (a record never changes). */
@@ -796,6 +878,7 @@ export class ColdStore {
             bytes,
             freedBytes,
             tooLarge: this.#reader === undefined ? 0 : this.#skips().size,
+            held: this.#held.size,
             ...(this.#lastPass === undefined ? {} : { lastPass: this.#lastPass }),
             ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }),
         };
@@ -886,19 +969,29 @@ export class ColdStore {
         }
 
         try {
-            // Units a crash left before any row was deleted: removed (they are this database's), then forgotten.
+            // Units a crash (or a failed remove) left before any row was deleted: removed (they are this database's),
+            // then forgotten. Then units released by restores whose remove failed.
             for (const [id, unit] of [...this.#abandoned]) {
                 if (dryRun || this.#closed) {
                     break;
                 }
 
-                await this.#client!.remove(unit);
-                await this.#db!.run(
-                    `DELETE FROM ${TABLE} WHERE conversation_id = ? AND unit = ? AND state IN ('copying', 'sealed')`,
-                    id,
-                    unit,
-                );
-                this.#abandoned.delete(id);
+                await this.#release(id, unit);
+                report.cleaned++;
+            }
+
+            const unremoved = dryRun
+                ? []
+                : (this.#reader!.prepare(
+                      `SELECT unit FROM ${RELEASED} WHERE removed = 0 ORDER BY at`,
+                  ).all() as { unit: string }[]);
+
+            for (const { unit } of unremoved) {
+                if (this.#closed) {
+                    break;
+                }
+
+                await this.#removeReleased(unit);
                 report.cleaned++;
             }
 
@@ -923,7 +1016,7 @@ export class ColdStore {
             if (!dryRun) {
                 // Deletions cut off by a crash or a stop first: their conversations are cold until finished or restored.
                 for (const [id, unit] of [...this.#units]) {
-                    if (unit.state === "deleting" && !this.#closed) {
+                    if (unit.state === "deleting" && !this.#closed && !this.#held.has(id)) {
                         await this.#exclusive(id, (archiving) => this.#delete(id, archiving));
                         report.resumed++;
                     }
@@ -1051,6 +1144,15 @@ export class ColdStore {
                     row.id === null ? [] : [Number(row.id)],
                 ),
             );
+
+        // Every fork up to here is in `forked`; `#stillQuiet` looks only past it.
+        this.#forksSeenTo = Number(
+            (
+                reader.prepare(`SELECT coalesce(max(id), 0) AS id FROM conversations`).get() as {
+                    id: number;
+                }
+            ).id,
+        );
         // Conversations forked from another (`ConversationRecord.parent`): the fork reads its parent's rows.
         const forked = ids(
             `SELECT DISTINCT json_extract(record, '$.parent.conversationId') AS id FROM conversations
@@ -1271,9 +1373,13 @@ export class ColdStore {
             return "a report of it is on its way";
         }
 
+        // Forks made before the pass looked are in its `forked` set; a newer one has a higher id (ids only grow), so
+        // only the conversations past what the pass saw are read, by their primary key.
         if (
             (await tx.get(
-                `SELECT 1 AS found FROM conversations WHERE json_extract(record, '$.parent.conversationId') = ? LIMIT 1`,
+                `SELECT 1 AS found FROM conversations WHERE id > ? AND json_extract(record, '$.parent.conversationId') = ?
+                    LIMIT 1`,
+                this.#forksSeenTo,
                 id,
             )) !== undefined
         ) {
@@ -1444,14 +1550,43 @@ export class ColdStore {
 
     /** Forget an attempt that deleted nothing, and remove its unit (recorded by this database), as far as it can. */
     async #forget(id: number, unit: string): Promise<void> {
-        await this.#db!.run(
-            `DELETE FROM ${TABLE} WHERE conversation_id = ? AND unit = ? AND state IN ('copying', 'sealed')`,
-            id,
-            unit,
-        );
-        await this.#client!.remove(unit).catch((error: unknown) => {
-            this.#host.log(`Cold store: unit ${unit} stays in the cold store: ${describe(error)}`);
+        try {
+            await this.#release(id, unit);
+        } catch (error) {
+            // The record stays: the next pass removes the unit, then forgets the attempt.
+            this.#abandoned.set(id, unit);
+            this.#host.log(
+                `Cold store: unit ${unit} stays in the cold store for now: ${describe(error)}`,
+            );
+        }
+    }
+
+    /**
+     * An attempt that deleted nothing: remove its unit first (recorded by this database), then forget the attempt and
+     * list the unit as released, in one transaction. A remove that fails leaves the record, for a later pass.
+     */
+    async #release(id: number, unit: string): Promise<void> {
+        await this.#client!.remove(unit);
+        await this.#db!.transaction(async (tx) => {
+            await tx.run(
+                `DELETE FROM ${TABLE} WHERE conversation_id = ? AND unit = ? AND state IN ('copying', 'sealed')`,
+                id,
+                unit,
+            );
+            await tx.run(
+                `INSERT OR REPLACE INTO ${RELEASED} (unit, conversation_id, removed, at) VALUES (?, ?, 1, ?)`,
+                unit,
+                id,
+                this.#host.now(),
+            );
         });
+        this.#abandoned.delete(id);
+    }
+
+    /** Remove the Worker's copy of a released unit, and say so in its record; a failure leaves it for the next pass. */
+    async #removeReleased(unit: string): Promise<void> {
+        await this.#client!.remove(unit);
+        await this.#db!.run(`UPDATE ${RELEASED} SET removed = 1 WHERE unit = ?`, unit);
     }
 
     /**
@@ -1850,6 +1985,12 @@ export class ColdStore {
 
                 const slice = page.rows.slice(from, to);
 
+                if (this.#held.has(id)) {
+                    throw new ColdMismatch(
+                        `Conversation ${id} stays cold until the server restarts (see the log).`,
+                    );
+                }
+
                 await db.transaction(async (tx) => {
                     for (const row of slice) {
                         const added = await tx.runCounted(
@@ -1900,12 +2041,25 @@ export class ColdStore {
             );
         }
 
+        if (this.#held.has(id)) {
+            throw new ColdMismatch(
+                `Conversation ${id} stays cold until the server restarts (see the log).`,
+            );
+        }
+
+        // Warm from here; the unit is listed as released, to remove now and, if that fails, at the next pass.
         await db.transaction(async (tx) => {
             await tx.run(`DELETE FROM ${ENTRIES} WHERE conversation_id = ?`, id);
             await tx.run(
                 `DELETE FROM ${TABLE} WHERE conversation_id = ? AND unit = ?`,
                 id,
                 unit.unit,
+            );
+            await tx.run(
+                `INSERT OR REPLACE INTO ${RELEASED} (unit, conversation_id, removed, at) VALUES (?, ?, 0, ?)`,
+                unit.unit,
+                id,
+                this.#host.now(),
             );
         });
         this.#units.delete(id);
@@ -1914,9 +2068,9 @@ export class ColdStore {
         this.#host.log(`Cold store: conversation ${id} is back (${unit.rows} entries).`);
         // The rows are whole here again: this database's unit goes from the Worker (its Tigris copy stays until an
         // operator purges it). Not waited for: a restore that `guard` waits on must not wait on this too.
-        void client.remove(unit.unit).catch((error: unknown) => {
+        void this.#removeReleased(unit.unit).catch((error: unknown) => {
             this.#host.log(
-                `Cold store: unit ${unit.unit} stays in the cold store: ${describe(error)}`,
+                `Cold store: unit ${unit.unit} stays in the cold store until the next pass: ${describe(error)}`,
             );
         });
     }

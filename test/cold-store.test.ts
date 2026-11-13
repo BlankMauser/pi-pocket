@@ -33,6 +33,7 @@ import {
     type ColdOptions,
     type ColdRow,
     type ColdStep,
+    ColdTooLarge,
     ColdUnavailable,
     coldStoreFromEnv,
     HttpColdClient,
@@ -50,6 +51,24 @@ class FakeCold implements ColdClient {
     readonly putsOf = new Map<string, number>();
     /** Milliseconds each page waits, as a slow cold store would. */
     pageDelay = 0;
+    /** Page requests so far. */
+    pages = 0;
+    /** While set, a page never answers until `release()`: a cold store that hangs. */
+    #hung: Promise<void> | undefined;
+    #release: (() => void) | undefined;
+    /** While set, a remove fails as a cold store that does not answer would. */
+    failRemove = false;
+
+    hang(): void {
+        this.#hung = new Promise((resolve) => {
+            this.#release = resolve;
+        });
+    }
+
+    release(): void {
+        this.#release?.();
+        this.#hung = undefined;
+    }
     /** Changes a row on its way back, as a cold store that lost or garbled it would. */
     garble: ((row: ColdRow) => ColdRow) | undefined;
     readonly pageRows = 3;
@@ -90,6 +109,8 @@ class FakeCold implements ColdClient {
 
     async page(unit: string, after: number): Promise<{ rows: ColdRow[]; next: number | null }> {
         this.#check();
+        this.pages++;
+        await this.#hung;
 
         if (this.pageDelay > 0) {
             await new Promise((resolve) => setTimeout(resolve, this.pageDelay));
@@ -129,6 +150,11 @@ class FakeCold implements ColdClient {
 
     async remove(unit: string): Promise<void> {
         this.#check();
+
+        if (this.failRemove) {
+            throw new ColdUnavailable("The cold store did not answer: fake outage of removes");
+        }
+
         this.units.delete(unit);
     }
 
@@ -230,6 +256,7 @@ const open = (dir: string, client: ColdClient | null, more: Partial<ColdOptions>
                       // Two rows a transaction: every archive and restore takes several.
                       txRows: 2,
                       requestBytes: REQUEST_BYTES,
+                      guardRestoreMs: 500,
                       onStep: (step, id) => onStep?.(step, id),
                       ...more,
                   },
@@ -446,6 +473,12 @@ test("the HTTP client tries again what the engine or a 5xx cut off, and never a 
         );
         await assert.rejects(client.seal("u", 1, 2), /503: .*backup failed/);
         assert.equal(calls, 3);
+
+        // Regression: a 413 stopped the whole pass; it is that conversation's failure, without a retry.
+        calls = 0;
+        answers.push({ status: 413, body: '{"error":"request too large"}' });
+        await assert.rejects(client.put("u", []), ColdTooLarge);
+        assert.equal(calls, 1);
 
         // A refused key: once.
         calls = 0;
@@ -1276,5 +1309,136 @@ test("with a time in use, a conversation just used is not taken, counted from th
         );
     } finally {
         await other.close();
+    }
+});
+
+test("a guarded call waits at most its limit for a cold store that hangs, then goes on with the rows here, and holds the conversation", async () => {
+    const id = await finished("hung");
+    const before = rowsOf(id);
+
+    await archive();
+    assert.equal(app.cold.isCold(id), true);
+
+    const conversation = (await app.harness.conversation(id, context))!;
+
+    cold.hang();
+
+    try {
+        const started = Date.now();
+        const page = await conversation.entries({}, 1000, undefined, context);
+
+        // Regression: it held Durable's line for each request's 3 attempts of 120 s.
+        assert.ok(Date.now() - started < 2_000, `held for ${Date.now() - started} ms`);
+        // What it gives: the rows that are here, the two kept ones.
+        assert.equal(page.items.length, keptOf(before).length);
+        assert.equal(app.cold.isCold(id), true);
+    } finally {
+        cold.release();
+    }
+
+    // The restore that was under way stops before it puts anything back.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(rowsOf(id), keptOf(before));
+
+    // From now on no request for it, though the cold store answers again: a second call goes on at once.
+    const pages = cold.pages;
+    const again = Date.now();
+
+    await conversation.entries({}, 1000, undefined, context);
+    assert.ok(Date.now() - again < 200);
+    assert.equal(cold.pages, pages, "no request in the hold");
+    // Pocket's own paths are refused until a restart: Durable may keep a range built from the rows here.
+    await assert.rejects(app.conversation(id), /restarts/);
+    assert.equal(cold.pages, pages);
+    assert.ok((await app.cold.status(false)).held >= 1);
+});
+
+test("an attempt that deleted nothing removes its unit before it forgets it; a failed remove is retried by the next pass", async () => {
+    const id = await finished("unremoved");
+    const before = rowsOf(id);
+
+    cold.garble = (row) => (row.id === before[1]!.id ? { ...row, record: `${row.record} ` } : row);
+    cold.failRemove = true;
+
+    try {
+        await archive();
+        // Regression: the attempt was forgotten first, and a failed remove lost the unit's name for good.
+        assert.equal(
+            sql<{ state: string }>(
+                dataDir,
+                "SELECT state FROM pocket_cold_units WHERE conversation_id = ?",
+                Number(id),
+            )[0]?.state,
+            "sealed",
+        );
+        assert.deepEqual(rowsOf(id), before);
+    } finally {
+        cold.garble = undefined;
+        cold.failRemove = false;
+    }
+
+    const unit = unitOf(id)!;
+    const report = await archive();
+
+    assert.ok(report.cleaned >= 1);
+    assert.equal(cold.units.has(unit), false);
+    assert.deepEqual(
+        sql(dataDir, "SELECT removed FROM pocket_cold_released WHERE unit = ?", unit),
+        [{ removed: 1 }],
+        "listed for an operator's purge of its Tigris copy",
+    );
+    assert.equal(app.cold.isCold(id), true, "archived by the same pass, in a unit of its own");
+
+    // A restore whose remove fails: warm at once, the unit listed, removed by the next pass.
+    const second = unitOf(id)!;
+
+    cold.failRemove = true;
+
+    try {
+        await app.conversation(id);
+    } finally {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        cold.failRemove = false;
+    }
+
+    assert.deepEqual(rowsOf(id), before);
+    assert.deepEqual(
+        sql(dataDir, "SELECT removed FROM pocket_cold_released WHERE unit = ?", second),
+        [{ removed: 0 }],
+    );
+    await app.cold.pass({ ageMs: 60 * 60 * 1000, limit: 0 });
+    assert.equal(cold.units.has(second), false);
+    assert.deepEqual(
+        sql(dataDir, "SELECT removed FROM pocket_cold_released WHERE unit = ?", second),
+        [{ removed: 1 }],
+    );
+});
+
+test("a key from the environment is used, warned about without being shown, and leaves the environment", async () => {
+    const dir = join(root, "cold-env-key");
+    const seen: string[] = [];
+
+    process.env.PI_POCKET_COLD_STORE_URL = "http://127.0.0.1:9";
+    process.env.PI_POCKET_COLD_STORE_KEY = "secret-env-key-123";
+
+    try {
+        const fromEnv = await openApp(scriptedModel(route), dir, undefined, undefined, {
+            log: (line) => seen.push(line),
+        });
+
+        try {
+            assert.equal(fromEnv.cold.configured, true);
+            assert.equal("PI_POCKET_COLD_STORE_KEY" in process.env, false);
+            assert.ok(seen.some((line) => line.includes("PI_POCKET_COLD_STORE_KEY_FILE")));
+            assert.equal(
+                seen.some((line) => line.includes("secret-env-key-123")),
+                false,
+            );
+        } finally {
+            await fromEnv.close();
+        }
+    } finally {
+        delete process.env.PI_POCKET_COLD_STORE_URL;
+        delete process.env.PI_POCKET_COLD_STORE_KEY;
     }
 });
