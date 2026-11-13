@@ -1,0 +1,21 @@
+src/server/cold-store.ts
+  s_1c803441e16f97::t_a9c047d402b29b 253-266,268-274
+test/cold-store.test.ts
+  s_1c803441e16f97::t_a9c047d402b29b 370-427
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bf4c1e347c90c6830709d11df9e40ce7217e4699",
+  "prompts": {},
+  "sessions": {
+    "s_1c803441e16f97": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "pi-pocket-pi",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
