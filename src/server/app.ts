@@ -1059,12 +1059,13 @@ export class PocketApp {
         // As `openNodeSqliteStorage` opens it, keeping the database: the cold store writes on the same connection.
         const database = await openNodeSqliteDatabase(path);
         const storage = await SqliteStorage.open(database);
+        // Watched by the cold store: a path past `cold.warm` to a cold conversation's entries brings them back.
+        const watched = this.cold.guard(storage);
 
-        this.#openingStorage = storage;
+        this.#openingStorage = watched;
         await this.cold.open(database, path, this.#coldSettings());
         this.harness = await Harness.open(
-            // Watched by the cold store: a path past `cold.warm` to a cold conversation's entries brings them back.
-            this.cold.guard(storage),
+            watched,
             {
                 models: this.models,
                 registry,
