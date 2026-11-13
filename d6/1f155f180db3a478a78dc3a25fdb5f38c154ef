@@ -1,0 +1,23 @@
+test/helpers.ts
+  s_1c803441e16f97::t_3506c4b0b52588 10,86,97
+src/server/cold-store.ts
+  s_1c803441e16f97::t_3506c4b0b52588 87-88,293,325,652,824-828,907
+test/cold-store.test.ts
+  s_1c803441e16f97::t_3506c4b0b52588 1-806
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d61f155f180db3a478a78dc3a25fdb5f38c154ef",
+  "prompts": {},
+  "sessions": {
+    "s_1c803441e16f97": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "pi-pocket-pi",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
