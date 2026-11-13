@@ -100,6 +100,13 @@ async function requestsOf(
     scope: ExtensionRequest,
     check: () => unknown,
 ): Promise<{ requests: number; lastPrompt: number }> {
+    // A subagent in the cold store: as counted when it went there, rather than bringing it back to count again.
+    const archived = app.cold.usageOf(id);
+
+    if (archived !== undefined) {
+        return archived;
+    }
+
     const conversation = await app.harness.conversation(id, scope.context);
 
     if (conversation === undefined) {

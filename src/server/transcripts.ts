@@ -79,6 +79,9 @@ export class Transcripts {
             return undefined;
         }
 
+        // A subagent's entries in the cold store come back first (`cold-store.ts`).
+        await this.#app.cold.warm(id);
+
         return this.#app.harness.commit(async (tx) => {
             const entry = await tx.entry(entryId as unknown as EntryId);
 

@@ -1150,6 +1150,56 @@ export function createApi(options: HttpOptions, auth: Auth) {
             });
         }
 
+        // The cold store of finished subagents' entries (`cold-store.ts`): its state, and a pass that moves them there.
+        if (first === "cold-store" && second === undefined && method === "GET") {
+            requireOwner(user);
+
+            return json(
+                response,
+                200,
+                await app.cold.status(url.searchParams.get("eligible") !== "0"),
+            );
+        }
+
+        if (first === "cold-store" && second === "pass" && third === undefined && method === "POST") {
+            requireOwner(user);
+            const body = await readJson<{ limit?: unknown; dryRun?: unknown; ageHours?: unknown }>(
+                request,
+            );
+
+            if (body === null || typeof body !== "object" || Array.isArray(body)) {
+                throw new HttpError(400, "Expected a pass object");
+            }
+
+            const number = (value: unknown, name: string, max: number): number | undefined => {
+                if (value === undefined) {
+                    return undefined;
+                }
+
+                if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max) {
+                    throw new HttpError(400, `${name} must be a number from 0 to ${max}`);
+                }
+
+                return value;
+            };
+            const limit = number(body.limit, "limit", 100_000);
+            const ageHours = number(body.ageHours, "ageHours", 100_000);
+
+            if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+                throw new HttpError(400, "dryRun must be true or false");
+            }
+
+            return json(
+                response,
+                200,
+                await app.cold.pass({
+                    ...(limit === undefined ? {} : { limit }),
+                    ...(ageHours === undefined ? {} : { ageMs: ageHours * 60 * 60 * 1000 }),
+                    dryRun: body.dryRun === true,
+                }),
+            );
+        }
+
         if (first === "restart" && method === "POST") {
             requireOwner(user);
 
