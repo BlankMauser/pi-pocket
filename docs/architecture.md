@@ -24,6 +24,21 @@ Some state lives in this process alone, and a restart forgets it. For example:
 - provider sign-ins in progress;
 - the edit and write calls Changes found in each session's history, so a look reads only the entries added since.
 
+## The cold store of finished subagents
+
+`cold-store.ts` moves the `entries` rows of finished subagents out of `pocket.sqlite` to a cold store (a Worker: `apps/pocket-cold-store` in MatchaMill), and brings them back row for row when someone needs them. It is off unless `PI_POCKET_COLD_STORE_URL` is set (https, or http to this machine), with the key in the file `PI_POCKET_COLD_STORE_KEY_FILE` (or in `PI_POCKET_COLD_STORE_KEY`), never on a command line. `PI_POCKET_COLD_STORE_AGE_HOURS` (default 24) is how long a subagent must be quiet. Nothing runs by itself: the owner runs a pass (`POST /api/cold-store/pass` with `limit`, `dryRun`, `ageHours`) and reads the state (`GET /api/cold-store`).
+
+What it relies on:
+
+- Pi Durable only inserts entries and has no API to remove them, so the store copies, deletes, and restores rows with raw SQL on Durable's own connection (one queue, so its transactions never overlap a commit), and reads with a second, read-only connection. Its state table `pocket_cold_units` is in the same file, written in the same transactions as the rows it describes. Durable's migrations ignore tables they do not own.
+- A pass takes a conversation only when it has an owner and is that owner's subagent (`parentOf`), no tab or peek has it open, it is not busy and has no live task, no queued or placed submission, no fork reads it, no reporter of it is live, its own outbox is empty, its report is not in its parent's outbox or batch, nothing went through `warm` for it just now, and its newest model message is older than the age. Just before deleting, each transaction checks again what can change.
+- The order is copy, seal (the cold store counts rows and bytes), read everything back and compare each field, and only then delete, a small transaction at a time. Until the state says `deleting`, every row is here, and a start forgets the attempt; from then on the sealed, verified copy stands for the rows, and the next pass finishes the deletion, or a restore puts them back.
+- The newest entry and the newest head marker of each archived conversation stay here. Durable keeps both in memory once read (`ConversationTails`), so a read of them while the rest is away must be right.
+- `warm(id)` is the choke point in front of Pocket's own paths: `PocketApp.conversation`, `room`, `Transcripts`, and a subagent's `send` or `interrupt` (`host.warmSubagent`). Every other path, Durable's own and extensions', goes through `guard`, the Storage Durable is given: it never waits, fetches, or throws (a Storage error ends the Session), but a read past the two kept rows, or a write, starts the restore and says so in the log.
+- A cold store that does not answer fails the request for that conversation with a 503, and nothing else. Search and usage sums leave out what is cold (usage counts what was counted when it went).
+
+Deleted rows free pages inside `pocket.sqlite`, but the file does not shrink (`auto_vacuum` is off). To shrink it, an operator runs `VACUUM` by hand, never Pocket: stop Pi Pocket, make sure the disk has free space of about twice the file's size, back up the data folder, then run `sqlite3 pocket.sqlite 'PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA quick_check;'`. The check must print `ok`, and `PRAGMA freelist_count` should be near 0. Compare the file's size before and after, then start Pi Pocket.
+
 ## Who owns what
 
 `PocketApp` (`app.ts`) creates the app's parts and hands each one the app.

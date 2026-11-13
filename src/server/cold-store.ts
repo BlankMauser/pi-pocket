@@ -43,7 +43,15 @@ export interface ColdClient {
 }
 
 /** The cold store did not answer, or answered with an error: nothing can be archived or restored now. */
-export class ColdUnavailable extends Error {}
+export class ColdUnavailable extends Error {
+    /** Whether the same request may work when tried again (no answer, a 5xx, an answer cut off). */
+    readonly retry: boolean;
+
+    constructor(message: string, retry = true) {
+        super(message);
+        this.retry = retry;
+    }
+}
 
 /** The cold store refused a request that depends on its state (a sealed unit, counts that differ). */
 export class ColdConflict extends Error {}
@@ -108,13 +116,17 @@ export type SubagentsLike = {
     readonly sending?: { readonly reports: readonly { readonly name: string }[] };
 };
 
-export type ColdCandidate = { id: number; rows: number; bytes: number; quietSince: number };
+/** `bytes` is measured only where it is reported (`#measure`): it reads every record, which on a big file is slow. */
+export type ColdCandidate = { id: number; rows: number; bytes?: number; quietSince: number };
 
 export type PassReport = {
     dryRun: boolean;
     ageHours: number;
-    /** Every conversation that may be archived now, with its rows and the UTF-8 bytes of their records. */
-    eligible: { conversations: number; rows: number; bytes: number };
+    /**
+     * Every conversation that may be archived now, with its rows and the UTF-8 bytes of their records. `bytes` only in
+     * a dry run: a pass measures only the ones it takes (`selected`), as measuring reads every record.
+     */
+    eligible: { conversations: number; rows: number; bytes?: number };
     /** Why the other subagents may not, by reason. */
     skipped: Record<string, number>;
     /** The ones this pass takes (or would take): the quiet longest first, up to `limit`. */
@@ -138,7 +150,8 @@ export type ColdStatus = {
     bytes: number;
     /** The UTF-8 bytes of records deleted here; the file shrinks by about as much only after a `VACUUM`. */
     freedBytes: number;
-    eligible?: { conversations: number; rows: number; bytes: number };
+    /** Without bytes: a dry run measures them. */
+    eligible?: { conversations: number; rows: number };
     lastPass?: { at: number; dryRun: boolean; archived: number; bytes: number; failed: number };
     lastError?: { at: number; conversationId?: number; message: string };
 };
@@ -194,7 +207,26 @@ export class HttpColdClient implements ColdClient {
         this.#timeoutMs = timeoutMs;
     }
 
+    /**
+     * One request, tried up to three times while the cold store does not answer, answers 5xx, or cuts the answer off:
+     * every call is idempotent (a put replaces its rows, a seal with the same counts seals again, a remove of nothing
+     * removes nothing). A refused key, a 4xx, and a conflict are not tried again.
+     */
     async #call(method: string, path: string, body?: string): Promise<unknown> {
+        for (let attempt = 1; ; attempt++) {
+            try {
+                return await this.#once(method, path, body);
+            } catch (error) {
+                if (!(error instanceof ColdUnavailable) || !error.retry || attempt >= 3) {
+                    throw error;
+                }
+
+                await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 500 : 2_000));
+            }
+        }
+    }
+
+    async #once(method: string, path: string, body?: string): Promise<unknown> {
         let response: Response;
 
         try {
@@ -218,11 +250,13 @@ export class HttpColdClient implements ColdClient {
         }
 
         if (!response.ok) {
-            throw new ColdUnavailable(
-                response.status === 401
-                    ? "The cold store refused the key."
-                    : `The cold store answered ${response.status}.`,
-            );
+            // Its own words, which never hold the key or a record: `backup failed: …`, `recovery failed: …`.
+            throw response.status === 401
+                ? new ColdUnavailable("The cold store refused the key.", false)
+                : new ColdUnavailable(
+                      `The cold store answered ${response.status}: ${text.slice(0, 200)}`,
+                      response.status >= 500,
+                  );
         }
 
         try {
@@ -581,7 +615,6 @@ export class ColdStore {
             status.eligible = {
                 conversations: candidates.length,
                 rows: candidates.reduce((sum, each) => sum + each.rows, 0),
-                bytes: candidates.reduce((sum, each) => sum + each.bytes, 0),
             };
         }
 
@@ -632,16 +665,21 @@ export class ColdStore {
         const dryRun = options.dryRun === true;
         const { candidates, skipped } = await this.#eligible(ageMs);
         const selected = candidates.slice(0, limit);
+
+        await this.#measure(dryRun ? candidates : selected);
+
         const report: PassReport = {
             dryRun,
             ageHours: ageMs / (60 * 60 * 1000),
             eligible: {
                 conversations: candidates.length,
                 rows: candidates.reduce((sum, each) => sum + each.rows, 0),
-                bytes: candidates.reduce((sum, each) => sum + each.bytes, 0),
+                ...(dryRun
+                    ? { bytes: candidates.reduce((sum, each) => sum + (each.bytes ?? 0), 0) }
+                    : {}),
             },
             skipped,
-            selected: selected.map(({ id, rows, bytes }) => ({ id, rows, bytes })),
+            selected: selected.map(({ id, rows, bytes }) => ({ id, rows, bytes: bytes ?? 0 })),
             archived: { conversations: 0, rows: 0, bytes: 0, freedBytes: 0 },
             resumed: 0,
             failed: [],
@@ -783,9 +821,9 @@ export class ColdStore {
             `SELECT (SELECT max(json_extract(m.value, '$.timestamp')) FROM json_each(e.record, '$.model') AS m) AS at
                 FROM entries AS e WHERE e.conversation_id = ? ORDER BY e.id DESC LIMIT 8`,
         );
-        const measure = reader.prepare(
-            `SELECT count(*) AS rows, coalesce(sum(octet_length(record)), 0) AS bytes FROM entries
-                WHERE conversation_id = ?`,
+        // The index alone: no record is read.
+        const count = reader.prepare(
+            `SELECT count(*) AS rows FROM entries WHERE conversation_id = ?`,
         );
         const docs = new Map<number, SubagentsLike | undefined>();
 
@@ -883,14 +921,24 @@ export class ColdStore {
                 continue;
             }
 
-            const size = measure.get(id) as { rows: number; bytes: number };
-
-            candidates.push({ id, rows: size.rows, bytes: size.bytes, quietSince });
+            candidates.push({ id, rows: (count.get(id) as { rows: number }).rows, quietSince });
         }
 
         candidates.sort((a, b) => a.quietSince - b.quietSince || a.id - b.id);
 
         return { candidates, skipped };
+    }
+
+    /** The UTF-8 bytes of each candidate's records, one conversation at a time between other work. */
+    async #measure(candidates: ColdCandidate[]): Promise<void> {
+        const bytes = this.#reader!.prepare(
+            `SELECT coalesce(sum(octet_length(record)), 0) AS bytes FROM entries WHERE conversation_id = ?`,
+        );
+
+        for (const candidate of candidates) {
+            candidate.bytes = (bytes.get(candidate.id) as { bytes: number }).bytes;
+            await yieldToOthers();
+        }
     }
 
     /** Whether nothing can have started in the conversation since the pass chose it. On Durable's line, in `tx`. */
@@ -1088,6 +1136,7 @@ export class ColdStore {
             await this.#delete(
                 id,
                 sizes.filter(([row]) => !keep.has(row)),
+                keep,
                 archiving,
             );
 
@@ -1285,10 +1334,13 @@ export class ColdStore {
     async #delete(
         id: number,
         sizes: readonly [number, number][],
+        keep: ReadonlySet<number>,
         archiving: Archiving,
     ): Promise<void> {
         const db = this.#db!;
         const unit = this.#units.get(id)!;
+        // The kept rows can lie inside a range of deleted ones (a head marker in the middle).
+        const [keepA = -1, keepB = -1] = [...keep];
         let from = 0;
 
         while (from < sizes.length) {
@@ -1314,10 +1366,12 @@ export class ColdStore {
                 }
 
                 const deleted = await tx.runCounted(
-                    `DELETE FROM entries WHERE conversation_id = ? AND id >= ? AND id <= ?`,
+                    `DELETE FROM entries WHERE conversation_id = ? AND id >= ? AND id <= ? AND id NOT IN (?, ?)`,
                     id,
                     first,
                     end,
+                    keepA,
+                    keepB,
                 );
 
                 if (deleted !== to - from) {
@@ -1402,6 +1456,7 @@ export class ColdStore {
             ids.flatMap((row) =>
                 keep.has(row.id) ? [] : [[row.id, row.bytes] as [number, number]],
             ),
+            keep,
             archiving,
         );
     }

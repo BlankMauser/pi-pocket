@@ -495,6 +495,41 @@ test("an archive copies every row exactly, deletes all but the two it keeps, and
     assert.ok(status.freedBytes > 0 && status.freedBytes < status.bytes);
 });
 
+test("a head marker between deleted rows stays, and the rows on both sides of it go", async () => {
+    const id = await finished("marked");
+
+    // A new context (`pi.reset`) and a message after it: the newest head marker is now in the middle.
+    await (await app.conversation(id)).reset("carry on", context);
+    await say(app, id, "after the reset");
+    await until(
+        async () =>
+            (await app.cold.pass({ dryRun: true, ageMs: 0, limit: 1000 })).selected.some(
+                (each) => each.id === Number(id),
+            ),
+        "marked quiet again",
+        15_000,
+    );
+
+    const before = rowsOf(id);
+    const kept = keptOf(before);
+
+    assert.equal(kept.length, 2);
+    assert.ok(
+        before.some((row) => row.id < kept[0]!.id) &&
+            before.some((row) => row.id > kept[0]!.id && row.id < kept[1]!.id),
+        "rows on both sides of the marker",
+    );
+
+    const report = await archive();
+
+    // Regression: one delete range spanned the kept marker, deleted one row too many, and the archive failed.
+    assert.deepEqual(report.failed, []);
+    assert.equal(app.cold.isCold(id), true);
+    assert.deepEqual(rowsOf(id), kept);
+    await app.conversation(id);
+    assert.deepEqual(rowsOf(id), before);
+});
+
 test("a second pass archives nothing new and sends nothing", async () => {
     await finished("twice");
     await archive();
