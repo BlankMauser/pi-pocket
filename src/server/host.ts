@@ -464,6 +464,8 @@ export interface PocketHost {
         target: ConversationId,
         reporterId: TaskId,
     ): Promise<Submission>;
+    /** Built-in subagents only: bring a subagent's entries back from the cold store before work goes to it. */
+    warmSubagent?(id: ConversationId): Promise<void>;
     /**
      * The role of a person by id, as core decides it; undefined for an id that is not a person here.
      *

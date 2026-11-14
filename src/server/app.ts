@@ -46,13 +46,15 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Alerts } from "./alerts.ts";
 import { Attribution, type Missing } from "./attribution.ts";
 import { RoutedBrowsers as Browsers } from "./remote-browser.ts";
 import type { BrowserState } from "./browser/page.ts";
 import { Collab, REACTIONS } from "./collab.ts";
+import { ColdStore, coldStoreFromEnv, type ColdOptions } from "./cold-store.ts";
 import { Commands } from "./commands.ts";
 import { ExtensionSessions } from "./extension-sessions.ts";
 import { LinkedSessions } from "./linked-sessions.ts";
@@ -370,6 +372,11 @@ export interface OpenOptions {
     restart?: () => void;
     /** Where Pi Pocket's own code is, for its updates; tests give a checkout of their own. */
     appRoot?: string;
+    /**
+     * The cold store finished subagents' entries move to (`cold-store.ts`). Undefined reads the environment
+     * (`PI_POCKET_COLD_STORE_URL`); null is none. Tests give a fake one.
+     */
+    coldStore?: ColdOptions | null;
 }
 
 export class PocketApp {
@@ -423,6 +430,16 @@ export class PocketApp {
     readonly workers = new Workers(() => this.dataDir);
     /** The conversation's stored history, as people read it. */
     readonly transcripts = new Transcripts(this);
+    /** Finished subagents' entries, moved to a cold store and brought back when someone needs them (`cold-store.ts`). */
+    readonly cold = new ColdStore({
+        parentOf: (id) => this.parentOf(id),
+        hasRoom: (id) => this.#rooms.has(id),
+        isBusy: (id) => this.isBusy(id),
+        subagents: async (id) => this.harness.snapshot(SubagentsDoc, id, context),
+        log: (line) => this.#log(line),
+        now: () => this.now(),
+    });
+    readonly #coldOptions: ColdOptions | undefined;
     /** Pi's sessions from the terminal, which the owner can continue here. */
     readonly piSessions = new PiSessions(this);
     /** PiP, the owner's assistant: its conversation, what its tools do, and the follows that report to it. */
@@ -542,6 +559,11 @@ export class PocketApp {
         this.config = new ConfigStore(options.dataDir);
         this.#lockFile = join(options.dataDir, "harness.lock");
         this.#log = options.log ?? ((line) => console.log(line));
+        // Now, before anything starts a child process: the key leaves this process's environment as it is read.
+        this.#coldOptions =
+            options.coldStore !== undefined
+                ? (options.coldStore ?? undefined)
+                : this.#coldFromEnv();
         this.cacheKeeper = new CacheKeeper({
             log: (line) => this.#log(line),
             conversationOf: (sessionId) => this.#conversationOfSession(sessionId),
@@ -801,6 +823,26 @@ export class PocketApp {
         this.#log(line);
     }
 
+    /** The cold store from the environment; a setting that is wrong leaves it off. */
+    #coldFromEnv(): ColdOptions | undefined {
+        try {
+            const settings = coldStoreFromEnv();
+
+            if (settings?.keyFrom === "environment") {
+                // Never the key itself.
+                this.#log(
+                    "Cold store: its key came from PI_POCKET_COLD_STORE_KEY. It is out of this process's environment now, but stays readable in /proc/<pid>/environ for as long as the server runs: use PI_POCKET_COLD_STORE_KEY_FILE.",
+                );
+            }
+
+            return settings;
+        } catch (error) {
+            this.#log(`The cold store is off: ${describe(error)}`);
+
+            return undefined;
+        }
+    }
+
     static async open(options: OpenOptions): Promise<PocketApp> {
         const app = new PocketApp(options);
 
@@ -937,6 +979,9 @@ export class PocketApp {
             requesterOf: (conversationId) => this.attribution.requesterOf(conversationId),
             interruptSubagent: (source, target, reporterId) =>
                 this.interruptSubagent(source, target, reporterId),
+            warmSubagent: async (id) => {
+                await this.cold.warm(id);
+            },
             machineActivity: (source, machineId) => this.machineActivity(source, machineId),
             roleOf: (personId) => this.config.userById(personId)?.role,
             on: (event, listener) => this.events.on(event, listener),
@@ -1019,11 +1064,17 @@ export class PocketApp {
         await this.#themeDefaultStillHere();
         await this.loader.loadAll();
 
-        const storage = await openNodeSqliteStorage(join(this.dataDir, "pocket.sqlite"));
+        const path = join(this.dataDir, "pocket.sqlite");
+        // As `openNodeSqliteStorage` opens it, keeping the database: the cold store writes on the same connection.
+        const database = await openNodeSqliteDatabase(path);
+        const storage = await SqliteStorage.open(database);
+        // Watched by the cold store: a path past `cold.warm` to a cold conversation's entries brings them back.
+        const watched = this.cold.guard(storage);
 
-        this.#openingStorage = storage;
+        this.#openingStorage = watched;
+        await this.cold.open(database, path, this.#coldOptions);
         this.harness = await Harness.open(
-            storage,
+            watched,
             {
                 models: this.models,
                 registry,
@@ -2747,6 +2798,9 @@ export class PocketApp {
 
         if (pending === undefined) {
             pending = (async () => {
+                // Before the room reads its view: entries in the cold store come back first.
+                await this.cold.warm(id);
+
                 const conversation = await this.harness.conversation(id, context);
 
                 if (conversation === undefined) {
@@ -3245,8 +3299,13 @@ export class PocketApp {
         );
     }
 
-    /** A conversation's handle; 404 when it does not exist. */
+    /**
+     * A conversation's handle; 404 when it does not exist. Its entries are here first: a subagent's that went to the
+     * cold store come back, or this fails with a 503 for this conversation alone.
+     */
     async conversation(id: ConversationId): Promise<Conversation> {
+        await this.cold.warm(id);
+
         const conversation = await this.harness.conversation(id, context);
 
         if (conversation === undefined) {
@@ -4445,6 +4504,8 @@ export class PocketApp {
                 }),
             ]);
             clearTimeout(limit);
+            // Before the storage: a pass stops at its next step, which leaves every conversation whole or cold.
+            await this.cold.close();
             let storageClosed = false;
 
             try {
