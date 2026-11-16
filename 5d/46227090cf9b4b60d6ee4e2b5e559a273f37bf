@@ -1,0 +1,32 @@
+src/server/app.ts
+  h_03360edcd9e88f 54,454-455,1027-1028
+src/server/baark-ryvfs.ts
+  h_03360edcd9e88f 1-388
+src/server/baark-watches.ts
+  h_03360edcd9e88f 1-603
+src/server/docs.ts
+  h_03360edcd9e88f 924-959
+src/server/extensions/ruttr-workspace.ts
+  h_03360edcd9e88f 1-320
+src/server/extensions/triggers.ts
+  h_03360edcd9e88f 9,99-170,174-179
+src/server/reload.ts
+  h_03360edcd9e88f 65,107,152-154
+src/server/workspace.ts
+  h_03360edcd9e88f 28,102,108-113,116,124,126-140
+src/server/worktrees.ts
+  h_03360edcd9e88f 11-18,87-92,96-102,172-175,201-206,233-238
+test/baark-workspace.test.ts
+  h_03360edcd9e88f 1-347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5d46227090cf9b4b60d6ee4e2b5e559a273f37bf",
+  "prompts": {},
+  "humans": {
+    "h_03360edcd9e88f": {
+      "author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
