@@ -51,6 +51,7 @@ import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlit
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Alerts } from "./alerts.ts";
 import { Attribution, type Missing } from "./attribution.ts";
+import { BaarkWatches } from "./baark-watches.ts";
 import { RoutedBrowsers as Browsers } from "./remote-browser.ts";
 import type { BrowserState } from "./browser/page.ts";
 import { Collab, REACTIONS } from "./collab.ts";
@@ -450,6 +451,8 @@ export class PocketApp {
     readonly watches = new Watches(this);
     /** PiP's standing orders on GitHub repositories: what happens there goes to PiP or a session (`repo-watches.ts`). */
     readonly repoWatches = new RepoWatches(this);
+    /** Watches of Baark node feeds and Sentinel/workflow runs (`baark-watches.ts`). */
+    readonly baarkWatches = new BaarkWatches(this);
     /** Webhooks: addresses other services post to, each a message to a session or PiP (`hooks.ts`). */
     readonly hooks = new Hooks(this);
     /** Lessons Pi keeps across sessions, for a project or everywhere. */
@@ -1020,6 +1023,8 @@ export class PocketApp {
                     .tools()
                     .map(({ tool }) => tool.name),
         };
+
+        Object.assign(host, { baarkWatches: this.baarkWatches });
 
         this.#registry = registry;
         const dropIn = join(this.dataDir, "extensions");
