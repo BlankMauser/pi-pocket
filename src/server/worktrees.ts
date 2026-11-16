@@ -8,6 +8,14 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { copyFile, lstat, mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+    baarkWorkspaceFileOf,
+    isRyvfsWorktree,
+    pijulDirOf,
+    removeRyvfsWorktree,
+    sourceRyvfsFolders,
+    tryCreateRyvfsWorktree,
+} from "./baark-ryvfs.ts";
 import { describe, HttpError } from "./errors.ts";
 import { git, GitError } from "./git.ts";
 import { workspaceScheme } from "./paths.ts";
@@ -76,9 +84,22 @@ export async function createWorktree(
         throw new HttpError(400, "Remote workspaces do not support worktrees.");
     }
 
+    const ryvfsWorktree = await tryCreateRyvfsWorktree(cwd, folder, label);
+
+    if (ryvfsWorktree !== undefined) {
+        return ryvfsWorktree;
+    }
+
     const root = await repositoryOf(cwd);
 
     if (root === undefined) {
+        if (pijulDirOf(cwd) !== undefined || baarkWorkspaceFileOf(cwd) !== undefined) {
+            throw new HttpError(
+                400,
+                `${cwd} has Pijul / workspace.kdl without initialized RyvFS stores; run \`ruttr workspace stores init\` first.`,
+            );
+        }
+
         throw new HttpError(
             400,
             `${cwd} is not in a git repository, so it cannot have a worktree.`,
@@ -148,6 +169,10 @@ export function inWorktree(worktree: Worktree, cwd: string): boolean {
  * session's folder as it was given. A folder that is only in the worktree maps to the session's folder.
  */
 export async function sourceFolders(worktree: Worktree): Promise<(cwd: string) => string> {
+    if (isRyvfsWorktree(worktree)) {
+        return sourceRyvfsFolders(worktree);
+    }
+
     const root = await repositoryOf(worktree.source);
     let original: string | undefined;
 
@@ -173,6 +198,12 @@ export async function sourceFolders(worktree: Worktree): Promise<(cwd: string) =
  * kept, unless `force`.
  */
 export async function removeWorktree(worktree: Worktree, force: boolean): Promise<void> {
+    if (isRyvfsWorktree(worktree)) {
+        await removeRyvfsWorktree(worktree, force);
+
+        return;
+    }
+
     if (!existsSync(worktree.path)) {
         return;
     }
@@ -199,6 +230,12 @@ export async function removeWorktree(worktree: Worktree, force: boolean): Promis
 
 /** Undo a worktree that a session never got: its folder and its branch. */
 export async function discardWorktree(worktree: Worktree): Promise<void> {
+    if (isRyvfsWorktree(worktree)) {
+        await removeRyvfsWorktree(worktree, true);
+
+        return;
+    }
+
     await removeWorktree(worktree, true);
     const root = await repositoryOf(worktree.source);
 

@@ -7,6 +7,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { type ConversationId, UsageDoc } from "@earendil-works/pi-durable";
+import type { OpenOptions } from "../src/server/app.ts";
 import type { Attachment } from "../src/server/commands.ts";
 import type { User } from "../src/server/config.ts";
 import type { LimitTuning } from "../src/server/limit-gate.ts";
@@ -82,6 +83,7 @@ export function openApp(
     dataDir = join(root, "data"),
     now?: () => number,
     limits?: Partial<LimitTuning>,
+    more?: Partial<OpenOptions>,
 ): Promise<App> {
     return PocketApp.open({
         dataDir,
@@ -92,6 +94,7 @@ export function openApp(
         home,
         ...(now === undefined ? {} : { now }),
         ...(limits === undefined ? {} : { limits }),
+        ...more,
     });
 }
 

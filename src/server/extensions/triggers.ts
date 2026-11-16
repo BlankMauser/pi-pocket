@@ -6,6 +6,7 @@
  */
 import { obj, opt, str, union } from "@earendil-works/pi-schema";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import type { BaarkWatches } from "../baark-watches.ts";
 import type { PrWatch } from "../docs.ts";
 import { quoted } from "../fence.ts";
 import type { PocketHost } from "../host.ts";
@@ -95,10 +96,86 @@ export default function createTriggers(host: PocketHost) {
 
     // A server started before repository watches has none to run: they come with its restart.
     const repoWatches = (host as Partial<PocketHost>).repoWatches;
+    const baarkWatches = (host as PocketHost & { baarkWatches?: BaarkWatches }).baarkWatches;
+
+    const baarkWatchTool = defineTool({
+        name: "baark_watch",
+        description:
+            "Watch a Baark node repository feed and Sentinel/cron workflows (`start`, `list`, `stop`) and deliver fenced `<baark-event>` updates to this conversation.",
+        parameters: obj(
+            {
+                action: union([literal("start"), literal("list"), literal("stop")]),
+                nodeUrl: opt(
+                    str({
+                        description:
+                            "start: Baark node base URL (e.g. https://... or http://127.0.0.1:4000).",
+                    }),
+                ),
+                repo: opt(str({ description: "start: Baark repository name." })),
+                instructions: opt(
+                    str({ description: "start: what to do when new Baark events arrive." }),
+                ),
+                id: opt(str({ description: "stop: watch id." })),
+            },
+            { open: true },
+        ),
+        replay: "safe",
+        execute: async (args, api) => {
+            if (baarkWatches === undefined) {
+                return reply("Baark watches require a server restart before they can be used.");
+            }
+
+            const requester = host.requesterOf(api.conversationId);
+
+            if (args.action === "list") {
+                const items = await baarkWatches.listForRequester(requester);
+
+                return reply(
+                    items.length === 0
+                        ? "No Baark watches are active."
+                        : items
+                              .map(
+                                  (w) =>
+                                      `${w.id}: ${w.repo} at ${w.nodeUrl} (${w.events.join(", ")})`,
+                              )
+                              .join("\n"),
+                );
+            }
+
+            if (args.action === "stop") {
+                if (!args.id?.trim()) {
+                    return reply("baark_watch stop requires `id`.");
+                }
+
+                const stopped = await baarkWatches.removeForRequester(requester, args.id);
+
+                return reply(`Stopped Baark watch ${stopped.id} (${stopped.repo}).`);
+            }
+
+            if (!args.nodeUrl?.trim() || !args.repo?.trim()) {
+                return reply("baark_watch start requires `nodeUrl` and `repo`.");
+            }
+
+            const started = await baarkWatches.addForRequester(api.conversationId, requester, {
+                nodeUrl: args.nodeUrl,
+                repo: args.repo,
+                ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
+                key: `${String(api.taskId)}:${api.callId}`,
+            });
+
+            return reply(
+                `Watching Baark repository ${started.repo} (${started.id}) at ${started.nodeUrl}.`,
+            );
+        },
+    });
 
     return defineExtension({
         name: TRIGGERS_EXTENSION,
-        tasks: [host.watches.task, ...(repoWatches === undefined ? [] : [repoWatches.task])],
-        tools: [watchPr],
+        tasks: [
+            host.watches.task,
+            ...(repoWatches === undefined ? [] : [repoWatches.task]),
+            ...(baarkWatches === undefined ? [] : [baarkWatches.task]),
+        ],
+        tools: [watchPr, baarkWatchTool],
     });
 }

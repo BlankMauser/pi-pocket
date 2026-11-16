@@ -1069,6 +1069,12 @@ export default function createSubagents(host: PocketHost, web?: ExtensionWeb) {
                 throw new Error("Subagent interrupt needs a server restart before it can be used.");
             }
 
+            // A subagent whose entries went to the cold store gets them back before it takes work (`cold-store.ts`):
+            // it would start on an empty context. One that cannot get them back fails here, before anything is sent.
+            if (action === "send" || action === "interrupt") {
+                await host.warmSubagent?.(agent!.conversationId);
+            }
+
             const parent = await api.agent(context);
 
             // Work goes to a subagent only on a model the owner's list holds, or, with no list, this session's own: one

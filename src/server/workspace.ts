@@ -25,6 +25,7 @@ import type { User } from "./config.ts";
 import { describe, HttpError } from "./errors.ts";
 import { FileLists, type FileListing, type FileView, viewFile } from "./files.ts";
 import { displayPath, expandHome } from "./paths.ts";
+import { baarkWorkspaceFileOf, pijulDirOf, pijulHeadOf, ryvfsComposeDirOf } from "./baark-ryvfs.ts";
 import { machineFolder, machinePath } from "./workers.ts";
 import { gzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
@@ -98,16 +99,21 @@ export class Workspace {
         return gitDir;
     }
 
-    /** Whether a folder is in a git repository. */
+    /** Whether a folder is in a git, Pijul, or Baark workspace repository. */
     inRepository(cwd: string): boolean {
         if (machinePath(cwd) !== undefined) {
             return this.#app.workers.metadata(cwd).inRepository;
         }
 
-        return this.#gitDir(cwd) !== undefined;
+        return (
+            this.#gitDir(cwd) !== undefined ||
+            pijulDirOf(cwd) !== undefined ||
+            baarkWorkspaceFileOf(cwd) !== undefined ||
+            ryvfsComposeDirOf(cwd) !== undefined
+        );
     }
 
-    /** What a conversation's folder has checked out, for its view: its repository's HEAD file, read as it is now. */
+    /** What a conversation's folder has checked out, for its view: its repository's HEAD file or Pijul channel. */
     head(id: ConversationId): Head | undefined {
         const cwd = this.#app.cwdOf(id);
 
@@ -115,9 +121,23 @@ export class Workspace {
             return this.#app.workers.metadata(cwd).head;
         }
 
-        const gitDir = this.#gitDir(this.#app.cwdOf(id));
+        const gitDir = this.#gitDir(cwd);
 
-        return gitDir === undefined ? undefined : headOf(gitDir);
+        if (gitDir !== undefined) {
+            return headOf(gitDir);
+        }
+
+        const dotPijul = pijulDirOf(cwd);
+
+        if (dotPijul !== undefined) {
+            return { branch: pijulHeadOf(dotPijul) };
+        }
+
+        if (ryvfsComposeDirOf(cwd) !== undefined || baarkWorkspaceFileOf(cwd) !== undefined) {
+            return { branch: "main" };
+        }
+
+        return undefined;
     }
 
     /** The branches of a session's repository, for the branch sheet: for people who can steer, as Changes is. */

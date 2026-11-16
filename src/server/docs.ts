@@ -921,6 +921,42 @@ export const RepoWatchesDoc = defineDoc<{ items: Record<string, RepoWatch> }>({
     initial: () => ({ items: {} }),
 });
 
+/** What a Baark repository watch looks for (`baark-watches.ts`). */
+export type BaarkEventKind = "feed" | "workflows";
+
+/**
+ * A watch of a Baark node repository (`baark-watches.ts`): new repository feed entries or Sentinel/workflow runs are
+ * delivered as fenced `<baark-event>` messages to its conversation.
+ */
+export type BaarkWatch = {
+    id: string;
+    nodeUrl: string;
+    repo: string;
+    events: BaarkEventKind[];
+    instructions: string;
+    target: number;
+    by: string;
+    createdAt: number;
+    taskId: TaskId;
+    next: number;
+    seen: string[];
+    count: number;
+    lastNewsAt?: number;
+    lastAt?: number;
+    errors: number;
+    note?: string;
+    key?: string;
+};
+
+/** Every Baark repository watch, by id. */
+export const BaarkWatchesDoc = defineDoc<{ items: Record<string, BaarkWatch> }>({
+    kind: "pocket.baark-watches",
+    version: 1,
+    ...rebased,
+    scope: "session",
+    initial: () => ({ items: {} }),
+});
+
 /** One comment on a design, pinned to an element of one version (`extensions/design.ts`). */
 export type DesignComment = {
     id: string;
