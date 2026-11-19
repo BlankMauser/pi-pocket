@@ -1,0 +1,22 @@
+docs/extensions/reference/names.md
+  h_03360edcd9e88f 20
+src/server/activity.ts
+  h_03360edcd9e88f 42-46,52-65,69,74-78
+src/server/extensions/ryvlet-authorship.ts
+  h_03360edcd9e88f 1-97
+src/server/reload.ts
+  h_03360edcd9e88f 66,109
+test/ryvlet-authorship.test.ts
+  h_03360edcd9e88f 1-131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3b09a1926ec323d0c9a4dc743d9a9f85c3608d04",
+  "prompts": {},
+  "humans": {
+    "h_03360edcd9e88f": {
+      "author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
