@@ -1,0 +1,14 @@
+src/server/extensions/ryvlet-authorship.ts
+  h_03360edcd9e88f 80-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5c709cd8f4ca58780695714bec98e7fb22ba1a1a",
+  "prompts": {},
+  "humans": {
+    "h_03360edcd9e88f": {
+      "author": "BlankMauser <thomasluvan@gmail.com>"
+    }
+  }
+}
